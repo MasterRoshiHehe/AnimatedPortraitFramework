@@ -1,0 +1,60 @@
+{
+    "Format": "2.0.0",
+    "Changes": [
+        {
+            "Action": "EditData",
+            "Target": "aedenthorn.DialogueDisplayFramework/dictionary",
+            "Fields": {
+                "default": {
+                    "width": 1200,
+                    "height": 384,
+                    "dialogue": {
+                        "xOffset": 8,
+                        "yOffset": 8,
+                        "width": 716
+                    },
+                    "portrait": {
+                        "xOffset": -352,
+                        "yOffset": 32,
+                        "right": true
+                    },
+                    "name": {
+                        "xOffset": -222,
+                        "yOffset": 320,
+                        "right": true
+                    },
+                    "jewel": {
+                        "xOffset": -64,
+                        "yOffset": 256,
+                        "right": true
+                    },
+                    "button": {
+                        "xOffset": -532,
+                        "yOffset": -44,
+                        "right": true,
+                        "bottom": true
+                    },
+                    "images": [
+                        {
+                            "ID": "DialogueDisplayFramework.Images.PortraitBackground",
+                            "texturePath": "LooseSprites/Cursors",
+                            "xOffset": -452,
+                            "right": true,
+                            "x": 583,
+                            "y": 411,
+                            "w": 115,
+                            "h": 97
+                        }
+                    ],
+                    "dividers": [
+                        {
+                            "ID": "DialogueDisplayFramework.Dividers.PortraitDivider",
+                            "xOffset": -484,
+                            "right": true
+                        }
+                    ]
+                }
+            }
+        }
+    ]
+}

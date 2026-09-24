@@ -1,0 +1,10 @@
+﻿{
+  "Name": "Dialogue Display Framework Continued",
+  "Author": "Mangupix",
+  "Version": "0.7.6",
+  "Description": "Framework allowing mods to edit the dialogue box.",
+  "UniqueID": "Mangupix.DialogueDisplayFrameworkContinued",
+  "EntryDll": "DialogueDisplayFramework.dll",
+  "MinimumApiVersion": "4.0.0",
+  "UpdateKeys": [ "Nexus:22678@DDFC" ]
+}

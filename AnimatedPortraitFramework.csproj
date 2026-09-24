@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <EnableHarmony>true</EnableHarmony>
+    <BundleExtraAssemblies>ThirdParty</BundleExtraAssemblies>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Pathoschild.Stardew.ModBuildConfig" Version="4.1.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="SVO Source\**" />
+    <None Remove="SVO Source\**" />
+    <Content Remove="SVO Source\**" />
+    <Compile Remove="DialogueDisplayFrameworkContinued-main\**" />
+    <None Remove="DialogueDisplayFrameworkContinued-main\**" />
+    <Content Remove="DialogueDisplayFrameworkContinued-main\**" />
+  </ItemGroup>
+
+</Project>
