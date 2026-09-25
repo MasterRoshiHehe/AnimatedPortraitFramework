@@ -21,19 +21,46 @@ namespace AnimatedPortraitFramework.Framework
         }
 
         /// <summary>
-        /// A seed that stays the same for one NPC + root variant for the whole in-game day,
-        /// including after restarting the game. (string.GetHashCode and HashCode.Combine are
-        /// randomised per process in .NET, so they can't be used for this.)
+        /// A seed that stays the same for one NPC + root variant for the whole in-game day, for every
+        /// player in multiplayer, and after restarting the game.
+        /// Uses the world date (not the per-player DaysPlayed stat, which differs for farmhands who joined
+        /// later). string.GetHashCode and HashCode.Combine are randomised per process, so they aren't used.
         /// </summary>
-        internal static int DailySeed(string npcName, string rootVariant)
+        /// <param name="npcName">The NPC's internal name.</param>
+        /// <param name="rootVariant">The root variant being rolled.</param>
+        /// <param name="dayOffset">Days relative to today, e.g. -1 for yesterday's roll.</param>
+        internal static int DailySeed(string npcName, string rootVariant, int dayOffset = 0)
         {
-            uint day = Context.IsWorldReady ? Game1.stats.DaysPlayed : 0;
+            int day = Context.IsWorldReady ? Game1.Date.TotalDays + NormalizeDayOffset(dayOffset) : 0;
             string key = $"{npcName?.ToLowerInvariant()}|{rootVariant?.ToLowerInvariant()}|{day}|{Game1.uniqueIDForThisGame}";
             return Game1.hash.GetDeterministicHashCode(key);
         }
 
-        public string Evaluate(string npcName, string rootVariant)
+        /// <summary>Use offset 0 if the offset would point before the first day of the save.</summary>
+        internal static int NormalizeDayOffset(int dayOffset)
         {
+            if (dayOffset == 0 || !Context.IsWorldReady)
+                return 0;
+            return Game1.Date.TotalDays + dayOffset < 0 ? 0 : dayOffset;
+        }
+
+        /// <summary>Whether any rule for this NPC + root has <see cref="VariantRule.CarryOver"/> enabled.</summary>
+        public bool IsCarryOver(string npcName, string rootVariant)
+        {
+            if (!_packManager.Rules.TryGetValue(npcName, out var rules))
+                return false;
+
+            return rules.Any(rule => rule.CarryOver && string.Equals(rule.Root, rootVariant, StringComparison.OrdinalIgnoreCase));
+        }
+
+        /// <summary>Pick the winning sub-variant for an NPC + root.</summary>
+        /// <param name="npcName">The NPC's internal name.</param>
+        /// <param name="rootVariant">The root variant (e.g. "Pyjamas").</param>
+        /// <param name="dayOffset">Days relative to today, e.g. -1 to recompute yesterday's roll.</param>
+        public string Evaluate(string npcName, string rootVariant, int dayOffset = 0)
+        {
+            dayOffset = NormalizeDayOffset(dayOffset);
+
             if (!_packManager.Rules.TryGetValue(npcName, out var rules))
                 return null;
 
@@ -52,7 +79,7 @@ namespace AnimatedPortraitFramework.Framework
                     foreach (var condition in variant.Conditions)
                     {
                         if (!string.Equals(condition.Type, "Random", StringComparison.OrdinalIgnoreCase)
-                            && !_conditionChecker.Check(condition, npcName, rootVariant))
+                            && !_conditionChecker.Check(condition, npcName, rootVariant, dayOffset))
                         {
                             allPass = false;
                             break;
@@ -73,7 +100,7 @@ namespace AnimatedPortraitFramework.Framework
                 return null;
 
             double totalWeight = topPriority.Sum(e => Math.Max(0.0, e.Weight));
-            double roll = new Random(DailySeed(npcName, rootVariant)).NextDouble() * totalWeight;
+            double roll = new Random(DailySeed(npcName, rootVariant, dayOffset)).NextDouble() * totalWeight;
 
             double accumulated = 0.0;
             var winner = topPriority[^1];
@@ -87,7 +114,7 @@ namespace AnimatedPortraitFramework.Framework
                 }
             }
 
-            _monitor.Log($"[APF] {npcName}/{rootVariant} -> {winner.Id} (priority {winner.Priority}, weight {winner.Weight}/{totalWeight})", LogLevel.Trace);
+            _monitor.Log($"[APF] {npcName}/{rootVariant} -> {winner.Id} (priority {winner.Priority}, weight {winner.Weight}/{totalWeight}{(dayOffset != 0 ? $", day offset {dayOffset}" : "")})", LogLevel.Trace);
             return winner.Id;
         }
     }

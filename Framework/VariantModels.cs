@@ -7,6 +7,14 @@ namespace AnimatedPortraitFramework.Framework
     {
         public string NPC { get; set; } = "";
         public string Root { get; set; } = "";
+
+        /// <summary>
+        /// When true, the first stretch of each day in which this root is active (e.g. pyjamas in the
+        /// morning) keeps yesterday's roll, i.e. the sub-variant the NPC went to bed in. Once the NPC is
+        /// no longer wearing this root, it switches to today's roll.
+        /// </summary>
+        public bool CarryOver { get; set; }
+
         public List<VariantDefinition> Variants { get; set; } = new();
     }
 

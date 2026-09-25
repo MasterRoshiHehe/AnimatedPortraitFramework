@@ -46,9 +46,34 @@ namespace AnimatedPortraitFramework.Framework
         /// <summary>Whether each dynamically discovered overworld variant is enabled.</summary>
         public Dictionary<string, bool> VariantEnabled { get; set; } = new();
 
+        /// <summary>Darken dialogue portraits to match the world's lighting.</summary>
+        public PortraitLightingConfig PortraitLighting { get; set; } = new();
+
         public bool IsVariantEnabled(string variantId)
         {
             return !VariantEnabled.TryGetValue(variantId, out bool enabled) || enabled;
         }
+    }
+
+    /// <summary>Settings for darkening dialogue portraits at night, in caves, etc.</summary>
+    public class PortraitLightingConfig
+    {
+        /// <summary>Whether portraits follow the world's lighting at all.</summary>
+        public bool Enabled { get; set; } = true;
+
+        /// <summary>How strongly portraits follow the world's darkness, in percent (100 = as dark as the world).</summary>
+        public int Strength { get; set; } = 60;
+
+        /// <summary>Portraits never get darker than this, in percent brightness.</summary>
+        public int MinimumBrightness { get; set; } = 35;
+
+        /// <summary>Extra multiplier for indoor darkness, in percent (100 = same as outdoors).</summary>
+        public int IndoorStrength { get; set; } = 100;
+
+        /// <summary>Darken evenly instead of taking on the game's (bluish) night colour.</summary>
+        public bool NeutralColors { get; set; } = false;
+
+        /// <summary>Apply to every portrait DDFC draws (true) or only portraits APF is showing (false).</summary>
+        public bool AllPortraits { get; set; } = true;
     }
 }

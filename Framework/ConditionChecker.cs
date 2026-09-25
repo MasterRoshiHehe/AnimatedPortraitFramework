@@ -14,7 +14,8 @@ namespace AnimatedPortraitFramework.Framework
             _modRegistry = modRegistry;
         }
 
-        public bool Check(ConditionDefinition condition, string npcName, string rootVariant)
+        /// <param name="dayOffset">Days relative to today for date-seeded conditions (e.g. -1 when recomputing yesterday's roll).</param>
+        public bool Check(ConditionDefinition condition, string npcName, string rootVariant, int dayOffset = 0)
         {
             return condition.Type.ToLowerInvariant() switch
             {
@@ -24,7 +25,7 @@ namespace AnimatedPortraitFramework.Framework
                 "time" => CheckTime(condition),
                 "location" => CheckLocation(condition),
                 "dayofweek" => CheckDayOfWeek(condition),
-                "random" => CheckRandom(condition, npcName, rootVariant),
+                "random" => CheckRandom(condition, npcName, rootVariant, dayOffset),
                 "hasflag" => CheckHasFlag(condition),
                 "mod" => CheckMod(condition),
                 _ => false
@@ -69,10 +70,10 @@ namespace AnimatedPortraitFramework.Framework
             return string.Equals(days[(Game1.dayOfMonth - 1) % 7], condition.Value, StringComparison.OrdinalIgnoreCase);
         }
 
-        private static bool CheckRandom(ConditionDefinition condition, string npcName, string rootVariant)
+        private static bool CheckRandom(ConditionDefinition condition, string npcName, string rootVariant, int dayOffset)
         {
             // Salted so a Random condition doesn't roll the same number as the weighted pick.
-            int seed = VariantEvaluator.DailySeed(npcName, rootVariant + "|random-condition");
+            int seed = VariantEvaluator.DailySeed(npcName, rootVariant + "|random-condition", dayOffset);
             return new Random(seed).NextDouble() <= condition.Chance;
         }
 

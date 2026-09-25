@@ -2,7 +2,7 @@
 
 A SMAPI framework for **animated NPC portraits** in Stardew Valley 1.6+.
 
-Version 1.3.0 adds native conditional variant rules for both animated portraits and overworld sprites. APF evaluates rules, selects weighted variants, and applies late sprite overlays internally; SVO is no longer required. Modders create simple **Content Packs** — just a folder with `manifest.json`, `content.json`, and PNG spritesheets. No C# coding required.
+APF also supports conditional outfit variants for both portraits and overworld sprites (with weighted daily rolls), can let Content Patcher decide which outfit an NPC wears, and can darken portraits to match the world's lighting. Modders create simple **Content Packs** — just a folder with `manifest.json`, `content.json`, and PNG spritesheets. No C# coding required.
 
 ---
 
@@ -19,32 +19,27 @@ Version 1.3.0 adds native conditional variant rules for both animated portraits 
 - **Overworld sprite overlays** — winning variants are patched at late asset priority while preserving extended animation frames from other edits.
 - **Dynamic GMCM toggles** — enable or disable each discovered variant without editing content files.
 - **Content Patcher compatibility** — APF respects portrait suffix overrides and applies sprite overlays late in the asset pipeline.
+- **Portrait lighting** — dialogue portraits darken with the world at night, in the rain, in caves and in the mines (configurable in GMCM).
 - **Standard SMAPI content packs** — drop in `Mods/`, done.
 
 ---
 
-## 1.4.0 Changes
+## 1.2.1 Changes
 
-- **New `VariantControl` option.** Set `"VariantControl": "ContentPatcher"` in a pack's `content.json` and APF follows whatever portrait Content Patcher and the game give the NPC (e.g. `Portraits/Marnie_Rainy` → its own `Rainy` images), instead of using its built-in season/weather/hearts logic. See [Letting Content Patcher choose the variant](#letting-content-patcher-choose-the-variant-variantcontrol). Packs without the option work exactly as before.
-- **Fixed:** portraits set in `Expressions` stopped `VariantExpressions` (and portrait-suffix variants) from ever being used. APF swapped in its own texture before it had read the NPC's real portrait.
-- **Fixed:** the NPC's real portrait wasn't always restored after a dialogue.
-- **Fixed:** semi-transparent pixels (hair edges, shadows) were darkened, because images were premultiplied twice. APF now loads its images straight from the pack folder, outside the game's asset pipeline, so other mods' edits to `Portraits/*` can't bleed into APF portraits.
-- **Fixed:** "once" animations jumped to a different frame after finishing instead of holding their last frame.
-- **Fixed:** the weighted daily outfit roll changed when the game was restarted. It's now stable for the whole in-game day.
+**New features**
 
----
+- **Portrait lighting.** Dialogue portraits now darken with the world: evenings, nights, rain, caves and the mines. APF reads the game's own lighting, so mods that change sunset times or indoor lighting are followed automatically. Configure it in GMCM (strength, minimum brightness, indoor strength, neutral colors, all portraits or APF only). See [Portrait Lighting](#portrait-lighting).
+- **`VariantControl` option.** Set `"VariantControl": "ContentPatcher"` in a pack's `content.json` and APF follows whatever portrait Content Patcher and the game give the NPC (e.g. `Portraits/Marnie_Rainy` → its own `Rainy` images), instead of using its built-in season/weather/hearts logic. See [Letting Content Patcher choose the variant](#letting-content-patcher-choose-the-variant-variantcontrol). Packs without the option work exactly as before.
+- **`CarryOver` option for Rules.** Add `"CarryOver": true` to a rule and the NPC wakes up in the sub-variant they went to bed in (e.g. last night's pyjamas). Once they change out of that root, today's roll takes over. See [Carry-over](#carry-over-wake-up-in-last-nights-outfit).
+- **Sprite Variant Orchestrator merged into APF.** Native `Rules` (including in `Include` files), conditions (hearts, weather, season, time, location, day of week, mail/event flags, loaded mods), priority + weighted selection with a stable daily roll, late-priority overworld sprite overlays (`Characters/{NPC}_{Root}` ← `Characters/{NPC}_{Root_Suffix}`), and GMCM toggles for every variant. SVO is no longer needed.
 
-## Recent 1.3.0 Changes
+**Fixes**
 
-This release merges Sprite Variant Orchestrator functionality into APF:
-
-- Added native `Rules` loading alongside `Portraits`, including recursive `Include` files.
-- Added conditional evaluation for hearts, weather, season, time, location, day of week, mail/event flags, and loaded mods.
-- Added priority and weighted selection for competing variants, with a stable roll per NPC, root variant, and in-game day.
-- Applied selected variants to APF portrait resolution and cached the winning NPC/root pair.
-- Added late-priority overworld sprite patching so `Characters/{NPC}_{Root}` can receive `Characters/{NPC}_{Root_Suffix}` overlays.
-- Added dynamic GMCM boolean toggles for every discovered variant ID.
-- Removed the structural dependency on SVO; APF now owns the complete variant workflow.
+- Portraits set in `Expressions` stopped `VariantExpressions` (and portrait-suffix variants) from ever being used. APF swapped in its own texture before it had read the NPC's real portrait.
+- The NPC's real portrait wasn't always restored after a dialogue.
+- Semi-transparent pixels (hair edges, shadows) were darkened, because images were premultiplied twice. APF now loads its images straight from the pack folder, outside the game's asset pipeline, so other mods' edits to `Portraits/*` can't bleed into APF portraits.
+- "Once" animations jumped to a different frame after finishing instead of holding their last frame.
+- The weighted daily outfit roll changed when the game was restarted, and could differ between host and farmhands in multiplayer. It's now stable for the whole in-game day and the same for every player.
 
 ---
 
@@ -437,7 +432,37 @@ Characters/Haley_Beach_PinkSuit.png
 Characters/Haley_Beach_BlackTube.png
 ```
 
-`Root` must match a variant that APF resolves for the NPC. `Id` should follow the `Root_Suffix` convention. Among eligible variants, the highest `Priority` wins; variants at that priority are selected by their relative `Weight`. A roll is stable for the current in-game day, so it does not change every frame.
+`Root` must match a variant that APF resolves for the NPC. `Id` should follow the `Root_Suffix` convention. Among eligible variants, the highest `Priority` wins; variants at that priority are selected by their relative `Weight`. A roll is stable for the current in-game day (for every player in multiplayer, and after restarting the game), so it does not change every frame.
+
+### Carry-over (wake up in last night's outfit)
+
+Rules roll a new sub-variant every day. For outfits worn across midnight, like pyjamas, that means the NPC would go to bed in one set and wake up in another. Add `"CarryOver": true` to the rule to fix that:
+
+```json
+{
+    "NPC": "Haley",
+    "Root": "Pyjamas",
+    "CarryOver": true,
+    "Variants": [
+        { "Id": "Pyjamas_Default",    "Priority": 10, "Weight": 1.0 },
+        { "Id": "Pyjamas_UndiesBlue", "Priority": 10, "Weight": 0.8 },
+        { "Id": "Pyjamas_Nude",       "Priority": 10, "Weight": 0.2 }
+    ]
+}
+```
+
+How it behaves:
+
+- **Morning:** the first stretch of the day in which the NPC wears this root uses **yesterday's** roll, i.e. what they went to bed in.
+- **After that:** as soon as the NPC is no longer wearing this root (their overworld sprite is no longer `Characters/{NPC}_{Root}`, meaning they got dressed), APF switches to **today's** roll. That's what they'll wear tonight, and so what they wake up in tomorrow.
+- **First day of a save:** there's no yesterday, so today's roll is used.
+- The portrait and the overworld sprite always match.
+
+You don't set any times or conditions for this; when the NPC wears the root is still decided by your Content Patcher Appearance entries. APF only remembers which sub-variant it was. Nothing is written to the save: yesterday's roll is simply recalculated, so it works in multiplayer and on existing saves.
+
+The morning ends when APF notices the NPC's sprite changed: every 10 in-game minutes and whenever you change location. Events and festivals don't count as "getting dressed".
+
+**Known limitation:** yesterday's roll is recalculated with *today's* game state. If the rule's variants have conditions like `Season` or `Weather`, the result can differ from what was actually worn yesterday, e.g. on the first day of a new season. Pyjamas rules normally have no conditions, so in practice this doesn't come up.
 
 ## Overworld Sprite Integration (Content Patcher)
 
@@ -523,12 +548,31 @@ Put the English fallback text in the content pack's `i18n/default.json`:
 - `Mode: "once"` is persisted per save. When several thresholds were skipped, only the highest current threshold is shown.
 - Triggers are skipped during events and when heart-based growth is disabled.
 
+## Portrait Lighting
+
+The dialogue box is drawn on top of the world, so at night bright portraits can stand out against a dark screen. APF can darken portraits to match the world. It's on by default and set in GMCM (APF's own page):
+
+| Option | Default | What it does |
+|---|---|---|
+| Enable | on | Turn portrait lighting on or off. |
+| Strength | 60% | How strongly portraits follow the world's darkness. 100% = as dark as the world. |
+| Minimum brightness | 35% | Portraits never get darker than this, so they stay readable. |
+| Indoor strength | 100% | How much indoor darkness counts, relative to outdoors. |
+| Neutral colors | off | Darken evenly instead of taking on the game's bluish night color. |
+| All portraits | on | On: every dialogue portrait. Off: only portraits shown by APF content packs. |
+
+**How it works:** APF reads the game's own final lighting values (the same ones the game uses to darken the world), so it automatically follows vanilla nights, rain, indoor lighting, caves and the mines, as well as mods that change those values, e.g. mods that change sunset times or adapt indoor lighting. The darkness is applied as a tint while the portrait is drawn: no extra drawing, textures or shaders, and it only runs while a dialogue is open. It fades smoothly when the lighting changes mid-conversation.
+
+**Not covered:** screen overlays that some graphics mods draw on top of the world themselves (e.g. golden sunset tints or a separate "night tint" layer). APF can't see those; use **Strength** and **Minimum brightness** to match your setup.
+
+Requires Dialogue Display Framework Continued (already required by APF). If DDFC's portrait drawing ever changes so APF can't hook it, APF logs a warning and portraits are simply drawn as normal.
+
 ## Compatibility
 
 - **Stardew Valley** 1.6+
 - **SMAPI** 4.0+
 - **Content Patcher**: compatible with portrait suffix overrides and other texture edits. APF applies overworld variant overlays at late asset priority.
-- **Sprite Variant Orchestrator (SVO)**: no longer required. Remove SVO after updating to APF 1.3.0 to avoid duplicate variant logic.
+- **Sprite Variant Orchestrator (SVO)**: no longer required. Remove SVO after updating to APF 1.2.1 to avoid duplicate variant logic.
 - Compatible with other portrait mods — APF only replaces portraits for NPCs defined in its content packs.
 - Multiple APF content packs can coexist (last loaded wins if targeting the same NPC).
 

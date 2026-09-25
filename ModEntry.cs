@@ -31,6 +31,14 @@ namespace AnimatedPortraitFramework
         internal static TextureManager TexManager;
         internal static ModEntry Instance;
         internal static ActiveVariantCache ActiveVariantCache = new();
+
+        /// <summary>
+        /// CarryOver rules (NPC + root) still in their "morning" stretch today: the NPC hasn't changed
+        /// out of that root yet, so the roll uses yesterday's seed. Key: "npc|root" (case-insensitive).
+        /// Filled at DayStarted, emptied as each NPC gets dressed. Recomputed from the world date, so
+        /// nothing is saved and every multiplayer client reaches the same result.
+        /// </summary>
+        private static readonly Dictionary<string, (string Npc, string Root)> _carryOverMorning = new(StringComparer.OrdinalIgnoreCase);
         private static VariantEvaluator _evaluator;
 
         /// <summary>User configuration (GMCM settings, persisted to config.json).</summary>
@@ -125,6 +133,7 @@ namespace AnimatedPortraitFramework
             Instance = this;
             ModMonitor = this.Monitor;
             Config = helper.ReadConfig<ModConfig>();
+            Config.PortraitLighting ??= new PortraitLightingConfig();
             PackManager = new ContentPackManager(this.Monitor);
             TexManager = PackManager.TextureManager;
             _evaluator = new VariantEvaluator(
@@ -142,6 +151,9 @@ namespace AnimatedPortraitFramework
                 original: AccessTools.Method(typeof(Game1), nameof(Game1.drawDialogue), new[] { typeof(NPC) }),
                 prefix: new HarmonyMethod(typeof(ModEntry), nameof(Game1_drawDialogue_Prefix))
             );
+
+            // Portrait lighting: tint DDFC's portrait draw to match the world's darkness.
+            PortraitLighting.Apply(harmony, this.Monitor);
 
             try
             {
@@ -166,6 +178,8 @@ namespace AnimatedPortraitFramework
             helper.Events.GameLoop.Saving += this.OnSaving;
             helper.Events.GameLoop.UpdateTicked += this.OnUpdateTicked;
             helper.Events.Player.Warped += this.OnWarped;
+            helper.Events.GameLoop.TimeChanged += this.OnTimeChanged;
+            helper.Events.GameLoop.ReturnedToTitle += this.OnReturnedToTitle;
             helper.Events.Content.AssetRequested += this.OnAssetRequested;
 
             this.Monitor.Log("Animated Portrait Framework initialized.", LogLevel.Info);
@@ -183,6 +197,7 @@ namespace AnimatedPortraitFramework
 
         private void OnSaveLoaded(object sender, SaveLoadedEventArgs e)
         {
+            _carryOverMorning.Clear(); // DayStarted refills it
             // Reload packs and invalidate caches so textures + DDF data refresh
             this.LoadContentPacks();
             this.InvalidateAssets();
@@ -251,6 +266,9 @@ namespace AnimatedPortraitFramework
             _deferredNormalNpcName = null;
             _deferredNormalAfterDialogues = null;
             _openingDeferredNormalDialogue = false;
+
+            // Before EvaluateAllOverworldSprites, so this morning's sprites use yesterday's roll.
+            this.StartCarryOverMornings();
 
             this.Monitor.Log($"[TRIGGER-DIAG] OnDayStarted fired. _triggeredData={_triggeredData != null}, Portraits={PackManager?.Portraits?.Count ?? -1}", LogLevel.Debug);
 
@@ -346,6 +364,118 @@ namespace AnimatedPortraitFramework
         private void OnWarped(object sender, WarpedEventArgs e)
         {
             this.EvaluateAllOverworldSprites();
+            this.CheckCarryOverMornings();
+        }
+
+        private void OnTimeChanged(object sender, TimeChangedEventArgs e)
+        {
+            this.CheckCarryOverMornings();
+        }
+
+        private void OnReturnedToTitle(object sender, ReturnedToTitleEventArgs e)
+        {
+            _carryOverMorning.Clear();
+        }
+
+        // ====================================================================
+        // CARRY-OVER (e.g. pyjamas: wake up in what you went to bed in)
+        // ====================================================================
+
+        private static string CarryOverKey(string npc, string root) => $"{npc}|{root}";
+
+        /// <summary>
+        /// At the start of a day, put every CarryOver rule (NPC + root) into its morning stretch, so
+        /// the first time that root is active today it uses yesterday's roll. Must run before
+        /// <see cref="EvaluateAllOverworldSprites"/> so the overworld sprite gets yesterday's roll too.
+        /// </summary>
+        private void StartCarryOverMornings()
+        {
+            _carryOverMorning.Clear();
+            if (PackManager?.Rules == null || _evaluator == null)
+                return;
+
+            foreach (var kvp in PackManager.Rules)
+            {
+                string npc = kvp.Key;
+                if (!PackManager.Portraits.ContainsKey(npc))
+                    continue;
+
+                foreach (var rule in kvp.Value)
+                {
+                    if (!rule.CarryOver || string.IsNullOrWhiteSpace(rule.Root))
+                        continue;
+
+                    string key = CarryOverKey(npc, rule.Root);
+                    if (_carryOverMorning.ContainsKey(key))
+                        continue;
+
+                    _carryOverMorning[key] = (npc, rule.Root);
+
+                    if (VariantEvaluator.NormalizeDayOffset(-1) == 0)
+                    {
+                        this.Monitor.Log($"[CARRY-OVER] {npc}/{rule.Root}: first day of the save, morning uses today's roll.", LogLevel.Debug);
+                    }
+                    else
+                    {
+                        string yesterday = _evaluator.Evaluate(npc, rule.Root, -1) ?? rule.Root;
+                        this.Monitor.Log($"[CARRY-OVER] {npc}/{rule.Root}: morning uses yesterday's roll '{yesterday}'", LogLevel.Debug);
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// End the morning stretch for every CarryOver NPC who is no longer wearing that root
+        /// (their overworld sprite isn't Characters/{NPC}_{Root} any more), and switch them to today's roll.
+        /// Cheap: only looks at pairs still in their morning, so it does nothing once everyone is dressed.
+        /// </summary>
+        private void CheckCarryOverMornings()
+        {
+            if (_carryOverMorning.Count == 0 || !Context.IsWorldReady || PackManager == null)
+                return;
+
+            // Event and festival sprites don't mean "she got dressed".
+            if (Game1.eventUp || Game1.isFestival())
+                return;
+
+            foreach (var entry in _carryOverMorning.ToList())
+            {
+                var (npcName, root) = entry.Value;
+
+                if (!PackManager.Portraits.TryGetValue(npcName, out var portrait))
+                {
+                    _carryOverMorning.Remove(entry.Key);
+                    continue;
+                }
+
+                NPC npc = Game1.getCharacterFromName(npcName);
+                if (npc?.currentLocation == null)
+                    continue;
+
+                if (IsWearingRoot(npc, root))
+                    continue;
+
+                _carryOverMorning.Remove(entry.Key);
+                string today = ApplyEvaluatedVariant(portrait, root);
+                this.Monitor.Log($"[CARRY-OVER] {npcName}/{root}: morning over → today's roll '{today}'", LogLevel.Debug);
+            }
+        }
+
+        /// <summary>
+        /// Whether the NPC's overworld sprite is currently this root: Characters/{TextureName}_{Root},
+        /// or one of its sub-variants (Characters/{TextureName}_{Root}_X).
+        /// </summary>
+        private static bool IsWearingRoot(NPC npc, string root)
+        {
+            string spriteAsset = npc.Sprite?.textureName?.Value;
+            string suffix = StripPrefix(spriteAsset, "Characters", NPC.getTextureNameForCharacter(npc.Name))
+                ?? StripPrefix(spriteAsset, "Characters", npc.Name);
+
+            if (suffix == null)
+                return false;
+
+            return string.Equals(suffix, root, StringComparison.OrdinalIgnoreCase)
+                || suffix.StartsWith(root + "_", StringComparison.OrdinalIgnoreCase);
         }
 
         private void EvaluateAllOverworldSprites()
@@ -1524,7 +1654,9 @@ namespace AnimatedPortraitFramework
             if (_evaluator == null || string.IsNullOrEmpty(resolvedRoot))
                 return resolvedRoot;
 
-            string winner = _evaluator.Evaluate(portrait.Target, resolvedRoot);
+            // CarryOver root still in its morning stretch → yesterday's roll (what the NPC went to bed in).
+            int dayOffset = _carryOverMorning.ContainsKey(CarryOverKey(portrait.Target, resolvedRoot)) ? -1 : 0;
+            string winner = _evaluator.Evaluate(portrait.Target, resolvedRoot, dayOffset);
             if (!string.IsNullOrEmpty(winner))
             {
                 ActiveVariantCache.TryGet(portrait.Target, resolvedRoot, out string currentWinner);
@@ -1691,6 +1823,11 @@ namespace AnimatedPortraitFramework
                     _openingDeferredNormalDialogue = false;
                 }
             }
+
+            if (Game1.activeClickableMenu is DialogueBox lightingBox)
+                PortraitLighting.Update(lightingBox, Game1.currentGameTime.ElapsedGameTime.TotalSeconds);
+            else
+                PortraitLighting.Reset();
 
             if (Game1.activeClickableMenu is DialogueBox dialogueBox
                 && dialogueBox.characterDialogue?.speaker != null)
@@ -1949,6 +2086,66 @@ namespace AnimatedPortraitFramework
         // GMCM INTEGRATION
         // ====================================================================
 
+        /// <summary>Add the portrait lighting options to APF's own GMCM page.</summary>
+        private void RegisterPortraitLightingGmcm(IGmcmApi gmcmApi)
+        {
+            var manifest = this.ModManifest;
+            PortraitLightingConfig L() => Config.PortraitLighting;
+
+            gmcmApi.AddSectionTitle(manifest, () => "Portrait Lighting");
+            gmcmApi.AddParagraph(manifest, () =>
+                "Darkens dialogue portraits to match how dark the world is (evenings, nights, rain, caves, the mines). "
+                + "Follows the game's own lighting, so mods that change sunset times or indoor lighting are followed automatically.");
+            gmcmApi.AddBoolOption(
+                mod: manifest,
+                name: () => "Enable",
+                tooltip: () => "Darken dialogue portraits to match the world's lighting.",
+                getValue: () => L().Enabled,
+                setValue: v => L().Enabled = v
+            );
+            gmcmApi.AddNumberOption(
+                mod: manifest,
+                name: () => "Strength",
+                tooltip: () => "How strongly portraits follow the world's darkness. 100% = as dark as the world itself.",
+                getValue: () => L().Strength,
+                setValue: v => L().Strength = v,
+                min: 0, max: 100, interval: 5,
+                formatValue: v => $"{v}%"
+            );
+            gmcmApi.AddNumberOption(
+                mod: manifest,
+                name: () => "Minimum brightness",
+                tooltip: () => "Portraits never get darker than this, so they stay readable.",
+                getValue: () => L().MinimumBrightness,
+                setValue: v => L().MinimumBrightness = v,
+                min: 0, max: 100, interval: 5,
+                formatValue: v => $"{v}%"
+            );
+            gmcmApi.AddNumberOption(
+                mod: manifest,
+                name: () => "Indoor strength",
+                tooltip: () => "How much indoor darkness counts, relative to outdoors. Lower this if portraits get too dark inside at night.",
+                getValue: () => L().IndoorStrength,
+                setValue: v => L().IndoorStrength = v,
+                min: 0, max: 100, interval: 5,
+                formatValue: v => $"{v}%"
+            );
+            gmcmApi.AddBoolOption(
+                mod: manifest,
+                name: () => "Neutral colors",
+                tooltip: () => "Darken evenly instead of taking on the game's bluish night color.",
+                getValue: () => L().NeutralColors,
+                setValue: v => L().NeutralColors = v
+            );
+            gmcmApi.AddBoolOption(
+                mod: manifest,
+                name: () => "All portraits",
+                tooltip: () => "On: every dialogue portrait is darkened. Off: only portraits shown by APF content packs.",
+                getValue: () => L().AllPortraits,
+                setValue: v => L().AllPortraits = v
+            );
+        }
+
         private void RegisterGmcm()
         {
             var gmcmApi = this.Helper.ModRegistry.GetApi<IGmcmApi>("spacechase0.GenericModConfigMenu");
@@ -2065,14 +2262,20 @@ namespace AnimatedPortraitFramework
                 this.Monitor.Log($"GMCM registered for '{packManifest.Name}': {npcNames.Count} character(s).", LogLevel.Info);
             }
 
+            // APF's own page: portrait lighting (always) + sprite variant toggles (if any rules).
+            gmcmApi.Register(
+                mod: this.ModManifest,
+                reset: () =>
+                {
+                    Config.PortraitLighting = new PortraitLightingConfig();
+                    Config.VariantEnabled.Clear();
+                },
+                save: () => this.Helper.WriteConfig(Config)
+            );
+            this.RegisterPortraitLightingGmcm(gmcmApi);
+
             if (PackManager.Rules.Count > 0)
             {
-                gmcmApi.Register(
-                    mod: this.ModManifest,
-                    reset: () => Config.VariantEnabled.Clear(),
-                    save: () => this.Helper.WriteConfig(Config)
-                );
-
                 foreach (var kvp in PackManager.Rules.OrderBy(k => k.Key))
                 {
                     string npcName = kvp.Key;
