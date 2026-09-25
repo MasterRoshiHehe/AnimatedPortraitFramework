@@ -2144,6 +2144,53 @@ namespace AnimatedPortraitFramework
                 getValue: () => L().AllPortraits,
                 setValue: v => L().AllPortraits = v
             );
+
+            gmcmApi.AddSectionTitle(manifest, () => "Light Sources");
+            gmcmApi.AddParagraph(manifest, () =>
+                "Nearby lights (lamps, torches, campfires, window light, lava, glowing sprites, and lights added by other mods) "
+                + "give back brightness in their own color. The closer the light, the stronger. Lights only undo darkness; "
+                + "they never make a portrait brighter than normal, so they do nothing in daylight.");
+            gmcmApi.AddBoolOption(
+                mod: manifest,
+                name: () => "Enable light sources",
+                tooltip: () => "Let nearby light sources brighten and tint the portrait.",
+                getValue: () => L().LightSources,
+                setValue: v => L().LightSources = v
+            );
+            gmcmApi.AddNumberOption(
+                mod: manifest,
+                name: () => "Light strength",
+                tooltip: () => "How strongly nearby lights undo the darkness. 100% = a light right next to the NPC fully restores the portrait.",
+                getValue: () => L().LightStrength,
+                setValue: v => L().LightStrength = v,
+                min: 0, max: 200, interval: 10,
+                formatValue: v => $"{v}%"
+            );
+            gmcmApi.AddNumberOption(
+                mod: manifest,
+                name: () => "Light reach",
+                tooltip: () => "How far lights reach, compared to how big they look in the game.",
+                getValue: () => L().LightReach,
+                setValue: v => L().LightReach = v,
+                min: 10, max: 300, interval: 10,
+                formatValue: v => $"{v}%"
+            );
+            gmcmApi.AddNumberOption(
+                mod: manifest,
+                name: () => "Light color",
+                tooltip: () => "How much a light's color tints the portrait. 0% = plain white light, 100% = the light's full color.",
+                getValue: () => L().LightHue,
+                setValue: v => L().LightHue = v,
+                min: 0, max: 100, interval: 5,
+                formatValue: v => $"{v}%"
+            );
+            gmcmApi.AddBoolOption(
+                mod: manifest,
+                name: () => "Player lights",
+                tooltip: () => "Let lights carried by players (lantern, glow ring) light up the NPC you're talking to.",
+                getValue: () => L().PlayerLights,
+                setValue: v => L().PlayerLights = v
+            );
         }
 
         private void RegisterGmcm()

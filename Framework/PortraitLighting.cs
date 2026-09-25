@@ -16,6 +16,10 @@ namespace AnimatedPortraitFramework.Framework
     /// mine lighting), so anything that changes the game's lighting (sunset-time mods like Dynamic Dusk, indoor
     /// lighting mods, rain, caves, the mines) is followed automatically.
     ///
+    /// Nearby light sources (lamps, torches, campfires, window lights, lava, glowing sprites; anything in
+    /// <see cref="Game1.currentLightSources"/>, including lights added or recoloured by other mods) then undo part of
+    /// that darkness, depending on distance, and tint the portrait with the light's colour.
+    ///
     /// The result is applied as a draw tint: DDFC's portrait draw call normally uses <see cref="Color.White"/>; a small
     /// Harmony transpiler swaps that for <see cref="GetTint"/>. No extra draws, textures or shaders.
     /// </summary>
@@ -108,7 +112,7 @@ namespace AnimatedPortraitFramework.Framework
                 if (!ReferenceEquals(box, _box))
                 {
                     _box = box;
-                    _factors = ComputeTargetFactors();
+                    _factors = ComputeTargetFactors(box);
                 }
 
                 return new Color(_factors.X, _factors.Y, _factors.Z, 1f);
@@ -128,7 +132,7 @@ namespace AnimatedPortraitFramework.Framework
             if (!IsActive || config == null || !config.Enabled)
                 return;
 
-            Vector3 target = ComputeTargetFactors();
+            Vector3 target = ComputeTargetFactors(box);
 
             if (!ReferenceEquals(box, _box))
             {
@@ -165,7 +169,7 @@ namespace AnimatedPortraitFramework.Framework
         /// colour (drawn non-premultiplied, so the stored value is rgb × alpha), then subtracts lightmap × lightmap from
         /// the screen (ReverseSubtract with SourceColor). So the darkening per channel is (rgb × alpha)².
         /// </summary>
-        private static Vector3 ComputeTargetFactors()
+        private static Vector3 ComputeTargetFactors(DialogueBox box)
         {
             var config = ModEntry.Config.PortraitLighting;
             GameLocation location = Game1.currentLocation;
@@ -197,7 +201,85 @@ namespace AnimatedPortraitFramework.Framework
                 strength *= Math.Clamp(config.IndoorStrength, 0, 100) / 100f;
 
             float minimum = Math.Clamp(config.MinimumBrightness, 0, 100) / 100f;
-            return Vector3.Clamp(Vector3.One - darkening * strength, new Vector3(minimum), Vector3.One);
+            Vector3 factors = Vector3.Clamp(Vector3.One - darkening * strength, new Vector3(minimum), Vector3.One);
+
+            // Nearby lights give back part of the lost brightness, in their own colour.
+            // They can only undo darkness, never make the portrait brighter than normal.
+            if (config.LightSources && factors != Vector3.One)
+            {
+                Vector3 light = GatherLight(box?.characterDialogue?.speaker, location, config);
+                light = Vector3.Clamp(light * (Math.Clamp(config.LightStrength, 0, 200) / 100f), Vector3.Zero, Vector3.One);
+                factors += (Vector3.One - factors) * light;
+            }
+
+            return factors;
+        }
+
+        /// <summary>
+        /// Add up the light reaching an NPC from every light source in the current location.
+        /// Returns per-channel light (0 = none, 1 = fully lit), before the Light strength setting.
+        /// </summary>
+        /// <remarks>
+        /// Game light facts (from the game code):
+        /// - A light is drawn as its light texture, centred on its position, scaled by its radius; so its reach is
+        ///   about half the texture's width × radius (a lantern at radius 1 reaches ~2 tiles).
+        /// - Light colours are stored inverted (the lightmap is subtracted from the screen): new Color(0, 80, 160) is a
+        ///   warm orange torch, Color.Black is white light. The visible colour is 255 − value.
+        /// - The colour's alpha scales the light's strength (fading lights, e.g. Color.HotPink * 0.75).
+        /// </remarks>
+        private static Vector3 GatherLight(NPC speaker, GameLocation location, PortraitLightingConfig config)
+        {
+            if (speaker == null || Game1.currentLightSources == null)
+                return Vector3.Zero;
+
+            // Light sources belong to the player's current location; skip NPCs somewhere else (e.g. on the phone).
+            if (speaker.currentLocation != null && !ReferenceEquals(speaker.currentLocation, location))
+                return Vector3.Zero;
+
+            // Roughly the NPC's upper body / face, not their feet.
+            Vector2 target = speaker.getStandingPosition() + new Vector2(0f, -48f);
+            float reachMultiplier = Math.Clamp(config.LightReach, 10, 300) / 100f;
+            float hue = Math.Clamp(config.LightHue, 0, 100) / 100f;
+            Vector3 total = Vector3.Zero;
+
+            // Game1.currentLightSources is a Dictionary<string, LightSource> since SDV 1.6.9.
+            foreach (LightSource light in Game1.currentLightSources.Values)
+            {
+                if (light == null)
+                    continue;
+
+                // Player-carried lights (lantern, glow ring).
+                long owner = light.PlayerID;
+                if (owner != 0)
+                {
+                    if (!config.PlayerLights)
+                        continue;
+                    if (owner != Game1.player.UniqueMultiplayerID
+                        && !ReferenceEquals(Game1.getFarmerMaybeOffline(owner)?.currentLocation, location))
+                        continue;
+                }
+
+                Color color = light.color.Value;
+                if (color.A == 0)
+                    continue;
+
+                float halfWidth = (light.lightTexture?.Width ?? 256) / 2f;
+                float reach = halfWidth * light.radius.Value * reachMultiplier;
+                if (reach <= 1f)
+                    continue;
+
+                float distance = Vector2.Distance(target, light.position.Value);
+                if (distance >= reach)
+                    continue;
+
+                float closeness = 1f - distance / reach;
+                float intensity = closeness * closeness * (color.A / 255f);
+
+                var visible = new Vector3(1f - color.R / 255f, 1f - color.G / 255f, 1f - color.B / 255f);
+                total += Vector3.Lerp(Vector3.One, visible, hue) * intensity;
+            }
+
+            return total;
         }
     }
 }

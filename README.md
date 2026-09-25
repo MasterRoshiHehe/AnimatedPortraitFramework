@@ -28,7 +28,7 @@ APF also supports conditional outfit variants for both portraits and overworld s
 
 **New features**
 
-- **Portrait lighting.** Dialogue portraits now darken with the world: evenings, nights, rain, caves and the mines. APF reads the game's own lighting, so mods that change sunset times or indoor lighting are followed automatically. Configure it in GMCM (strength, minimum brightness, indoor strength, neutral colors, all portraits or APF only). See [Portrait Lighting](#portrait-lighting).
+- **Portrait lighting.** Dialogue portraits now darken with the world: evenings, nights, rain, caves and the mines. APF reads the game's own lighting, so mods that change sunset times or indoor lighting are followed automatically. Nearby light sources (lamps, torches, campfires, window light, lava, glowing sprites) give brightness back in their own color. Configure it in GMCM. See [Portrait Lighting](#portrait-lighting).
 - **`VariantControl` option.** Set `"VariantControl": "ContentPatcher"` in a pack's `content.json` and APF follows whatever portrait Content Patcher and the game give the NPC (e.g. `Portraits/Marnie_Rainy` → its own `Rainy` images), instead of using its built-in season/weather/hearts logic. See [Letting Content Patcher choose the variant](#letting-content-patcher-choose-the-variant-variantcontrol). Packs without the option work exactly as before.
 - **`CarryOver` option for Rules.** Add `"CarryOver": true` to a rule and the NPC wakes up in the sub-variant they went to bed in (e.g. last night's pyjamas). Once they change out of that root, today's roll takes over. See [Carry-over](#carry-over-wake-up-in-last-nights-outfit).
 - **Sprite Variant Orchestrator merged into APF.** Native `Rules` (including in `Include` files), conditions (hearts, weather, season, time, location, day of week, mail/event flags, loaded mods), priority + weighted selection with a stable daily roll, late-priority overworld sprite overlays (`Characters/{NPC}_{Root}` ← `Characters/{NPC}_{Root_Suffix}`), and GMCM toggles for every variant. SVO is no longer needed.
@@ -562,6 +562,27 @@ The dialogue box is drawn on top of the world, so at night bright portraits can 
 | All portraits | on | On: every dialogue portrait. Off: only portraits shown by APF content packs. |
 
 **How it works:** APF reads the game's own final lighting values (the same ones the game uses to darken the world), so it automatically follows vanilla nights, rain, indoor lighting, caves and the mines, as well as mods that change those values, e.g. mods that change sunset times or adapt indoor lighting. The darkness is applied as a tint while the portrait is drawn: no extra drawing, textures or shaders, and it only runs while a dialogue is open. It fades smoothly when the lighting changes mid-conversation.
+
+### Light sources
+
+Nearby light sources give back part of the darkness, in their own color: stand next to a torch at night and the portrait is lit warm orange, next to a blue light it gets a cool tint. The closer the light, the stronger. APF reads the game's own list of lights in the current location, so this includes:
+
+- lamps, sconces, window light and other lights placed in the map (window light switches off at dusk and in rain, as in the game);
+- player-placed torches, campfires, braziers, lamps and other lighting items;
+- lava in the mines and the Volcano;
+- glowing sprites, e.g. festival lanterns and the Moonlight Jellies;
+- your own lantern or glow ring (optional);
+- lights added or recolored by other mods.
+
+Lights only undo darkness; they never make a portrait brighter than normal, so in daylight they do nothing. Each light counts as a circle around its center, as big as it looks in the game.
+
+| Option | Default | What it does |
+|---|---|---|
+| Enable light sources | on | Let nearby lights brighten and tint the portrait. |
+| Light strength | 100% | How strongly lights undo the darkness. 100% = a light right next to the NPC fully restores the portrait. |
+| Light reach | 100% | How far lights reach, compared to how big they look in the game. |
+| Light color | 80% | How much a light's color tints the portrait. 0% = plain white light. |
+| Player lights | on | Lights carried by players (lantern, glow ring) light up the NPC you're talking to. |
 
 **Not covered:** screen overlays that some graphics mods draw on top of the world themselves (e.g. golden sunset tints or a separate "night tint" layer). APF can't see those; use **Strength** and **Minimum brightness** to match your setup.
 

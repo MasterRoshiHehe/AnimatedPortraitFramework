@@ -75,5 +75,20 @@ namespace AnimatedPortraitFramework.Framework
 
         /// <summary>Apply to every portrait DDFC draws (true) or only portraits APF is showing (false).</summary>
         public bool AllPortraits { get; set; } = true;
+
+        /// <summary>Whether nearby light sources (lamps, torches, campfires, lava, …) brighten and tint the portrait.</summary>
+        public bool LightSources { get; set; } = true;
+
+        /// <summary>How strongly nearby lights undo the darkness, in percent.</summary>
+        public int LightStrength { get; set; } = 100;
+
+        /// <summary>How far lights reach, in percent of the game's own light size.</summary>
+        public int LightReach { get; set; } = 100;
+
+        /// <summary>How much a light's colour tints the portrait, in percent (0 = white light only).</summary>
+        public int LightHue { get; set; } = 80;
+
+        /// <summary>Whether lights carried by players (lantern, glow ring) count.</summary>
+        public bool PlayerLights { get; set; } = true;
     }
 }
