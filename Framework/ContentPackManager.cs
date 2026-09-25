@@ -108,6 +108,17 @@ namespace AnimatedPortraitFramework.Framework
                         continue;
                     }
 
+                    // Pack-level VariantControl applies unless the portrait sets its own.
+                    if (string.IsNullOrWhiteSpace(portrait.VariantControl))
+                        portrait.VariantControl = data.VariantControl;
+                    if (!string.IsNullOrWhiteSpace(portrait.VariantControl)
+                        && !portrait.IsContentPatcherControlled
+                        && !string.Equals(portrait.VariantControl.Trim(), "APF", StringComparison.OrdinalIgnoreCase))
+                    {
+                        this.Monitor.Log($"  {portrait.Target}: unknown VariantControl '{portrait.VariantControl}'. Use \"APF\" or \"ContentPatcher\". Falling back to \"APF\".", LogLevel.Warn);
+                        portrait.VariantControl = "APF";
+                    }
+
                     // Resolve computed fields for each expression
                     foreach (var kvp in portrait.Expressions)
                     {
@@ -157,6 +168,10 @@ namespace AnimatedPortraitFramework.Framework
                         && this.NpcPackIds.TryGetValue(portrait.Target, out string prevPackId)
                         && prevPackId == pack.Manifest.UniqueID)
                     {
+                        // Keep the first explicit VariantControl for this NPC
+                        if (string.IsNullOrWhiteSpace(existingPortrait.VariantControl))
+                            existingPortrait.VariantControl = portrait.VariantControl;
+
                         // Merge Variants (avoid duplicates)
                         if (portrait.Variants != null)
                         {
@@ -251,6 +266,9 @@ namespace AnimatedPortraitFramework.Framework
                                 break;
                         }
                     }
+
+                    if (portrait.IsContentPatcherControlled)
+                        this.Monitor.Log($"  {portrait.Target}: variants controlled by Content Patcher (VariantControl = ContentPatcher).", LogLevel.Info);
 
                     // Track sprite provider for texture loading
                     if (portrait.IsPerExpressionMode)

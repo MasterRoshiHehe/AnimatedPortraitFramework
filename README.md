@@ -23,6 +23,17 @@ Version 1.3.0 adds native conditional variant rules for both animated portraits 
 
 ---
 
+## 1.4.0 Changes
+
+- **New `VariantControl` option.** Set `"VariantControl": "ContentPatcher"` in a pack's `content.json` and APF follows whatever portrait Content Patcher and the game give the NPC (e.g. `Portraits/Marnie_Rainy` → its own `Rainy` images), instead of using its built-in season/weather/hearts logic. See [Letting Content Patcher choose the variant](#letting-content-patcher-choose-the-variant-variantcontrol). Packs without the option work exactly as before.
+- **Fixed:** portraits set in `Expressions` stopped `VariantExpressions` (and portrait-suffix variants) from ever being used. APF swapped in its own texture before it had read the NPC's real portrait.
+- **Fixed:** the NPC's real portrait wasn't always restored after a dialogue.
+- **Fixed:** semi-transparent pixels (hair edges, shadows) were darkened, because images were premultiplied twice. APF now loads its images straight from the pack folder, outside the game's asset pipeline, so other mods' edits to `Portraits/*` can't bleed into APF portraits.
+- **Fixed:** "once" animations jumped to a different frame after finishing instead of holding their last frame.
+- **Fixed:** the weighted daily outfit roll changed when the game was restarted. It's now stable for the whole in-game day.
+
+---
+
 ## Recent 1.3.0 Changes
 
 This release merges Sprite Variant Orchestrator functionality into APF:
@@ -317,6 +328,54 @@ Notes:
 - Included files may themselves include further files. Each file is loaded at most once; duplicates and missing files log a warning instead of breaking the pack.
 - If the same `Target` is defined twice within one pack, the last definition wins (a warning is logged).
 - `Include` is fully optional — existing packs with a single `content.json` work unchanged.
+
+---
+
+## Letting Content Patcher choose the variant (`VariantControl`)
+
+By default APF picks an NPC's variant itself (season, weather, beach, heart level). If you'd rather let Content Patcher and the game decide, with Appearance entries, game state queries (including ones added by mods like BETAS), `When` conditions, events and so on, set `VariantControl` to `ContentPatcher`:
+
+```json
+{
+    "Format": "1.0.0",
+    "VariantControl": "ContentPatcher",
+    "Include": [ "definitions/Marnie.json" ]
+}
+```
+
+It can also be set on a single portrait definition (`"VariantControl": "ContentPatcher"` next to `"Target"`), which overrides the pack setting. Allowed values: `APF` (default) and `ContentPatcher`. The pack-level setting is only read from the main `content.json`.
+
+### How it works
+
+APF doesn't have its own conditions in this mode. It just looks at what the game is showing:
+
+1. Your Content Patcher pack gives the NPC a portrait the normal way. Usually that's an `Appearance` entry in `Data/Characters` with `"Portrait": "Portraits/Marnie_Rainy"`. An event's `changePortrait Marnie Rainy` works too.
+2. When a dialogue opens, APF reads that portrait's name and takes the part after `Portraits/Marnie_`, here `Rainy`.
+3. APF shows its own `Rainy` image for the current expression, loaded straight from the APF pack folder.
+
+**The one rule:** the text after `Portraits/{NPC}_` must match a variant name in your APF definition (a `VariantExpressions` key, a `Variants` entry or a rule `Root`). `Portraits/{NPC}` itself (no suffix) means the base `Expressions`.
+
+The `Portraits/...` assets must still exist in the game, as always for Appearance entries. The image inside them doesn't matter to APF. It's only shown for expressions APF has no image for, or when APF is disabled, so a normal portrait sheet there makes a good fallback.
+
+**Always up to date:** the game normally only re-checks Appearance entries when an NPC changes location. In this mode APF asks the game to re-check them each time you start talking to the NPC, so time-based outfits switch right away. This is skipped during events, which set portraits themselves.
+
+**For NPCs in ContentPatcher mode, APF:**
+
+- does **not** pick variants from season, weather, location or hearts;
+- does **not** show heart trigger dialogues or body-change transitions;
+- does **not** offer the GMCM "Lock Variant" option;
+- **does** still use `Rules`: if the game shows a variant that is a rule `Root` (e.g. `Beach`), APF rolls one of its sub-variants (e.g. `Beach_PinkSuit`) with the usual priority/weight and a stable daily roll. For random outfits you can also just use `Weight` on Appearance entries.
+
+### Which image is shown
+
+For each expression, APF uses the first of these that exists:
+
+1. `VariantExpressions[variant][expression]`. For a variant like `Beach_PinkSuit`, APF also tries `Beach`.
+2. The base expression's own per-variant `Variants` map, or a variant subfolder next to its sprite.
+3. The base `Expressions[expression]` sprite.
+4. Nothing configured: the game's own portrait (your `Portraits/...` sheet) is shown.
+
+APF loads its images straight from your pack folder. They never go through `Portraits/{NPC}`, so other mods that edit that asset can't bleed into them. Layout (size, scale, offsets) stays with DDF: use `"OverrideDdf": false` and leave out `Ddf` if your own DDF template should control it.
 
 ---
 

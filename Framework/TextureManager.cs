@@ -9,17 +9,19 @@ using StardewValley;
 namespace AnimatedPortraitFramework.Framework
 {
     /// <summary>
-    /// Manages per-expression texture loading, caching, and disposal.
-    /// In per-expression mode, only the current expression's texture is loaded into VRAM,
-    /// keeping memory usage minimal (~80 MB per active expression instead of 1+ GB for a full sheet).
-    /// Supports seasonal/location variants — cache key includes the active variant.
+    /// Loads, caches and disposes APF's own portrait textures.
+    /// Textures are read straight from the content pack folder with Texture2D.FromStream, so they
+    /// never pass through the game's asset pipeline (Portraits/*) and other mods can't edit them.
     /// </summary>
     public class TextureManager
     {
         private readonly IMonitor _monitor;
 
-        /// <summary>Cached textures: cache key → Texture2D. Key format: \"NPC:expr:variant\".</summary>
+        /// <summary>Cached textures. Key format: "NPC|spritePath|frameSize|columns".</summary>
         private readonly Dictionary<string, Texture2D> _cache = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>Every texture APF created, so APF can tell its own textures apart from the game's.</summary>
+        private readonly HashSet<Texture2D> _owned = new(ReferenceEqualityComparer.Instance);
 
         /// <summary>Content pack references for loading: NPC name → IContentPack.</summary>
         private readonly Dictionary<string, IContentPack> _packs = new(StringComparer.OrdinalIgnoreCase);
@@ -36,6 +38,12 @@ namespace AnimatedPortraitFramework.Framework
         public void RegisterPack(string npc, IContentPack pack)
         {
             _packs[npc] = pack;
+        }
+
+        /// <summary>Whether this texture was created by APF.</summary>
+        public bool IsOwned(Texture2D texture)
+        {
+            return texture != null && _owned.Contains(texture);
         }
 
         /// <summary>Get the currently active variant for an NPC (empty string = default).</summary>
@@ -67,24 +75,18 @@ namespace AnimatedPortraitFramework.Framework
             return true;
         }
 
-        private string CacheKey(string npc, int expressionIndex, string variant)
-        {
-            return $"{npc}:{expressionIndex}:{variant ?? ""}";
-        }
-
         /// <summary>
-        /// Get (or load) the texture for a specific expression + variant.
-        /// Returns null if the sprite path is missing or loading fails.
-        /// The loaded spritesheet is repacked to 2 columns so the game's
-        /// source rect calculation (tile = texture.Width / 2) gives the correct frame size.
+        /// Get (or load) the texture for a sprite path. Returns null if the file is missing or loading fails.
+        /// Sheets wider than two frames are repacked to 2 columns so the game's source rect
+        /// calculation (tile = texture.Width / 2) gives the correct frame size.
         /// </summary>
-        public Texture2D GetOrLoad(string npc, int expressionIndex, string spritePath, int frameSize, int columns)
+        public Texture2D GetOrLoad(string npc, string spritePath, int frameSize, int columns)
         {
             if (string.IsNullOrWhiteSpace(spritePath))
                 return null;
 
-            string variant = GetActiveVariant(npc);
-            string key = CacheKey(npc, expressionIndex, variant);
+            string normalizedSpritePath = spritePath.Replace('\\', '/');
+            string key = $"{npc}|{normalizedSpritePath}|{frameSize}|{columns}";
 
             if (_cache.TryGetValue(key, out var existing) && existing != null && !existing.IsDisposed)
                 return existing;
@@ -92,7 +94,7 @@ namespace AnimatedPortraitFramework.Framework
             if (!_packs.TryGetValue(npc, out var pack))
                 return null;
 
-            string fullPath = Path.Combine(pack.DirectoryPath, spritePath);
+            string fullPath = Path.Combine(pack.DirectoryPath, normalizedSpritePath);
             if (!File.Exists(fullPath))
             {
                 _monitor.Log($"Expression sprite not found: {fullPath}", LogLevel.Error);
@@ -101,34 +103,24 @@ namespace AnimatedPortraitFramework.Framework
 
             try
             {
-                Texture2D tex = null;
-                string normalizedSpritePath = spritePath.Replace('\\', '/');
-
-                try
-                {
-                    tex = pack.ModContent.Load<Texture2D>(normalizedSpritePath);
-                }
-                catch (Exception ex)
-                {
-                    _monitor.Log($"ModContent.Load failed for {npc} expr {expressionIndex} ({normalizedSpritePath}): {ex.Message}", LogLevel.Trace);
-                }
-
-                if (tex == null)
-                {
-                    using var stream = File.OpenRead(fullPath);
+                // Always load our own copy. SMAPI's ModContent.Load returns a shared, already
+                // premultiplied texture; premultiplying or disposing that one corrupts it.
+                Texture2D tex;
+                using (var stream = File.OpenRead(fullPath))
                     tex = Texture2D.FromStream(Game1.graphics.GraphicsDevice, stream);
-                }
 
                 PremultiplyAlpha(tex);
                 tex = RepackToTwoColumns(tex, frameSize, columns);
+                tex.Name = $"APF/{npc}/{normalizedSpritePath}";
+
                 _cache[key] = tex;
-                string variantLabel = string.IsNullOrEmpty(variant) ? "default" : variant;
-                _monitor.Log($"Loaded expression texture: {npc} expr {expressionIndex} variant={variantLabel} ({tex.Width}x{tex.Height})", LogLevel.Trace);
+                _owned.Add(tex);
+                _monitor.Log($"Loaded portrait texture: {npc} ← {normalizedSpritePath} ({tex.Width}x{tex.Height})", LogLevel.Trace);
                 return tex;
             }
             catch (Exception ex)
             {
-                _monitor.Log($"Failed to load expression texture for {npc} expr {expressionIndex}: {ex.Message}", LogLevel.Error);
+                _monitor.Log($"Failed to load portrait texture for {npc} ({normalizedSpritePath}): {ex.Message}", LogLevel.Error);
                 return null;
             }
         }
@@ -179,16 +171,15 @@ namespace AnimatedPortraitFramework.Framework
 
             var repacked = new Texture2D(Game1.graphics.GraphicsDevice, newWidth, newHeight);
             repacked.SetData(dstPixels);
-            original.Dispose();
+            original.Dispose(); // safe: this is our own FromStream texture, not a shared one
 
             _monitor.Log($"Repacked spritesheet from {origW}x{origH} ({srcColumns} cols) to {newWidth}x{newHeight} (2 cols)", LogLevel.Trace);
             return repacked;
         }
 
         /// <summary>
-        /// Convert straight alpha (from PNG loading via FromStream) to premultiplied alpha
-        /// for correct rendering with MonoGame's SpriteBatch / BlendState.AlphaBlend.
-        /// No thresholding — preserves original alpha values as-is.
+        /// Convert straight alpha (from Texture2D.FromStream) to premultiplied alpha
+        /// for correct rendering with SpriteBatch / BlendState.AlphaBlend.
         /// </summary>
         private static void PremultiplyAlpha(Texture2D texture)
         {
@@ -198,14 +189,17 @@ namespace AnimatedPortraitFramework.Framework
             for (int i = 0; i < data.Length; i++)
             {
                 byte a = data[i].A;
-                if (a == 0 || a == 255) continue;
+                if (a == 255)
+                    continue;
 
-                data[i] = new Color(
-                    (byte)(data[i].R * a / 255),
-                    (byte)(data[i].G * a / 255),
-                    (byte)(data[i].B * a / 255),
-                    a
-                );
+                // Fully transparent pixels must be black too, or they add colour when blended.
+                data[i] = a == 0
+                    ? Color.Transparent
+                    : new Color(
+                        (byte)(data[i].R * a / 255),
+                        (byte)(data[i].G * a / 255),
+                        (byte)(data[i].B * a / 255),
+                        a);
             }
 
             texture.SetData(data);
@@ -214,7 +208,7 @@ namespace AnimatedPortraitFramework.Framework
         /// <summary>Dispose all cached textures for an NPC (all variants).</summary>
         public void DisposeNpc(string npc)
         {
-            string prefix = npc + ":";
+            string prefix = npc + "|";
             var keysToRemove = new List<string>();
             foreach (var kvp in _cache)
             {
@@ -222,6 +216,7 @@ namespace AnimatedPortraitFramework.Framework
                 {
                     if (kvp.Value != null && !kvp.Value.IsDisposed)
                         kvp.Value.Dispose();
+                    _owned.Remove(kvp.Value);
                     keysToRemove.Add(kvp.Key);
                 }
             }
@@ -236,6 +231,7 @@ namespace AnimatedPortraitFramework.Framework
             foreach (var tex in _cache.Values)
                 if (tex != null && !tex.IsDisposed) tex.Dispose();
             _cache.Clear();
+            _owned.Clear();
             _activeVariants.Clear();
             _packs.Clear();
         }

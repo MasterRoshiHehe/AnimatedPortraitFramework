@@ -20,6 +20,18 @@ namespace AnimatedPortraitFramework.Framework
             _monitor = monitor;
         }
 
+        /// <summary>
+        /// A seed that stays the same for one NPC + root variant for the whole in-game day,
+        /// including after restarting the game. (string.GetHashCode and HashCode.Combine are
+        /// randomised per process in .NET, so they can't be used for this.)
+        /// </summary>
+        internal static int DailySeed(string npcName, string rootVariant)
+        {
+            uint day = Context.IsWorldReady ? Game1.stats.DaysPlayed : 0;
+            string key = $"{npcName?.ToLowerInvariant()}|{rootVariant?.ToLowerInvariant()}|{day}|{Game1.uniqueIDForThisGame}";
+            return Game1.hash.GetDeterministicHashCode(key);
+        }
+
         public string Evaluate(string npcName, string rootVariant)
         {
             if (!_packManager.Rules.TryGetValue(npcName, out var rules))
@@ -61,11 +73,7 @@ namespace AnimatedPortraitFramework.Framework
                 return null;
 
             double totalWeight = topPriority.Sum(e => Math.Max(0.0, e.Weight));
-            int seed = HashCode.Combine(
-                StringComparer.OrdinalIgnoreCase.GetHashCode(npcName),
-                StringComparer.OrdinalIgnoreCase.GetHashCode(rootVariant),
-                Context.IsWorldReady ? (int)Game1.stats.DaysPlayed : 0);
-            double roll = new Random(seed).NextDouble() * totalWeight;
+            double roll = new Random(DailySeed(npcName, rootVariant)).NextDouble() * totalWeight;
 
             double accumulated = 0.0;
             var winner = topPriority[^1];

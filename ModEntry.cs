@@ -37,16 +37,26 @@ namespace AnimatedPortraitFramework
         internal static ModConfig Config;
 
         /// <summary>Tracks how many ticks since the current dialogue started.</summary>
-        private int _dialogueTickCount;
+        private static int _dialogueTickCount;
 
         /// <summary>Reference to the current DialogueBox to detect new dialogue instances.</summary>
-        private DialogueBox _lastDialogueBox;
+        private static DialogueBox _lastDialogueBox;
 
-        /// <summary>Original portrait texture per NPC, for restoration when dialogue closes.</summary>
-        private readonly Dictionary<string, Texture2D> _originalPortraits = new(StringComparer.OrdinalIgnoreCase);
+        /// <summary>
+        /// The NPC's real portrait texture (the one the game/Content Patcher gave it) from before APF
+        /// swapped in its own texture. Restored when the dialogue closes, and used to read the
+        /// portrait suffix (e.g. Portraits/Marnie_Rainy → "Rainy").
+        /// </summary>
+        private static readonly Dictionary<string, (NPC Npc, Texture2D Texture)> _originalPortraits = new(StringComparer.OrdinalIgnoreCase);
 
-        /// <summary>Currently loaded expression index per NPC (per-expression mode only).</summary>
-        private readonly Dictionary<string, int> _currentExprLoaded = new(StringComparer.OrdinalIgnoreCase);
+        /// <summary>The APF texture currently applied to each speaking NPC.</summary>
+        private static readonly Dictionary<string, Texture2D> _appliedTextures = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// True while APF itself asks the game for the vanilla portrait index, so the
+        /// getPortraitIndex postfix returns the untouched vanilla value.
+        /// </summary>
+        private static bool _queryingVanillaIndex;
 
         /// <summary>NPC name for which we have patched DDF's cached ActiveData in the current dialogue session.</summary>
         private static string _ddfPatchedNpc;
@@ -84,13 +94,13 @@ namespace AnimatedPortraitFramework
         private readonly Dictionary<string, string> _pendingTriggerVariant = new(StringComparer.OrdinalIgnoreCase);
 
         /// <summary>CP/event portrait suffix override detected at dialogue start (e.g. "Pyjamas" from Portraits/Haley_Pyjamas).</summary>
-        private readonly Dictionary<string, string> _cpVariantOverrides = new(StringComparer.OrdinalIgnoreCase);
+        private static readonly Dictionary<string, string> _cpVariantOverrides = new(StringComparer.OrdinalIgnoreCase);
 
         /// <summary>Body-change animations queued for NPCs whose trigger hasn't been injected yet.</summary>
         private readonly Dictionary<string, ExpressionDefinition> _pendingBodyChange = new(StringComparer.OrdinalIgnoreCase);
 
         /// <summary>Body-change animations ready to play on the next dialogue box for an NPC.</summary>
-        private readonly Dictionary<string, ExpressionDefinition> _activeBodyChange = new(StringComparer.OrdinalIgnoreCase);
+        private static readonly Dictionary<string, ExpressionDefinition> _activeBodyChange = new(StringComparer.OrdinalIgnoreCase);
 
         /// <summary>
         /// The normal dialogue which was temporarily covered by a one-time trigger.
@@ -189,6 +199,7 @@ namespace AnimatedPortraitFramework
             PackManager.LoadAll(this.Helper.ContentPacks.GetOwned());
             ActiveAnimations.Clear();
             ActiveVariantCache.Clear();
+            _resolvedSpriteCache.Clear();
 
             // Check if any portrait has DDF settings to inject
             _hasDdfConfig = false;
@@ -255,6 +266,10 @@ namespace AnimatedPortraitFramework
                 var portrait = kvp.Value;
 
                 if (portrait.VariantTriggers == null || portrait.VariantTriggers.Count == 0)
+                    continue;
+
+                // Heart triggers belong to APF's own variant logic.
+                if (portrait.IsContentPatcherControlled)
                     continue;
 
                 if (!IsNpcEnabled(npcName) || !IsGrowthEnabled(npcName))
@@ -435,6 +450,9 @@ namespace AnimatedPortraitFramework
             if (_triggeredData == null || portrait.VariantTriggers == null || portrait.VariantTriggers.Count == 0)
                 return;
 
+            if (portrait.IsContentPatcherControlled)
+                return;
+
             if (!IsNpcEnabled(npcName) || !IsGrowthEnabled(npcName))
                 return;
 
@@ -493,6 +511,7 @@ namespace AnimatedPortraitFramework
 
             string npcName = speaker.Name;
             if (!PackManager.Portraits.TryGetValue(npcName, out var portrait)
+                || portrait.IsContentPatcherControlled
                 || !IsNpcEnabled(npcName)
                 || !IsGrowthEnabled(npcName))
             {
@@ -1121,87 +1140,111 @@ namespace AnimatedPortraitFramework
 
         private static void Dialogue_getPortraitIndex_Postfix(Dialogue __instance, ref int __result)
         {
-            if (__instance?.speaker?.Name == null)
+            // APF is asking for the untouched vanilla index itself.
+            if (_queryingVanillaIndex)
                 return;
 
-            string speakerName = __instance.speaker.Name;
+            string speakerName = __instance?.speaker?.Name;
+            if (speakerName == null || PackManager == null || Instance == null)
+                return;
 
-            // If UpdateTicked hasn't registered this NPC yet (very first frame),
-            // still override so vanilla 64×64 rendering never shows with our large texture.
-            if (!string.Equals(speakerName, CurrentAnimatedNpc, StringComparison.OrdinalIgnoreCase))
+            if (!PackManager.Portraits.TryGetValue(speakerName, out var portrait) || !IsNpcEnabled(speakerName))
+                return;
+
+            // Only handle the dialogue box that is actually showing this dialogue.
+            if (Game1.activeClickableMenu is not DialogueBox dialogueBox
+                || !ReferenceEquals(dialogueBox.characterDialogue, __instance))
+                return;
+
+            // The game (or DDFC) can draw the box before APF's first UpdateTicked for it.
+            // Set the session up right now, so the NPC's real portrait is saved and its
+            // suffix is read *before* APF swaps in its own texture.
+            if (!IsAnimating
+                || !string.Equals(CurrentAnimatedNpc, speakerName, StringComparison.OrdinalIgnoreCase)
+                || !ReferenceEquals(_lastDialogueBox, dialogueBox))
             {
-                if (PackManager != null && PackManager.Portraits.TryGetValue(speakerName, out var portrait) && IsNpcEnabled(speakerName))
-                {
-                    LastVanillaPortraitIndex = __result;
-                    string exprKey = __result.ToString();
-
-                    if (!ActiveAnimations.TryGetValue(speakerName, out var state))
-                    {
-                        state = new AnimationState(portrait);
-                        ActiveAnimations[speakerName] = state;
-                    }
-                    string variant = TexManager.GetActiveVariant(speakerName);
-                    state.SetExpression(__result, variant);
-
-                    if (state.ActiveExpression != null)
-                    {
-                        // Only patch DDF when we actually have an animated expression
-                        EnsureDdfPortraitSettings(portrait);
-
-                        if (portrait.IsPerExpressionMode)
-                        {
-                            var activeExpr = state.ActiveExpression;
-                            if (!string.IsNullOrWhiteSpace(activeExpr.Sprite))
-                            {
-                                string resolvedSprite;
-                                if (!string.IsNullOrEmpty(variant)
-                                    && portrait.VariantExpressions.Count > 0
-                                    && portrait.VariantExpressions.ContainsKey(variant)
-                                    && portrait.VariantExpressions[variant].ContainsKey(exprKey))
-                                {
-                                    resolvedSprite = portrait.VariantExpressions[variant][exprKey].Sprite;
-                                }
-                                else
-                                {
-                                    var defaultExprDef = portrait.Expressions.ContainsKey(exprKey) ? portrait.Expressions[exprKey] : activeExpr;
-                                    resolvedSprite = ResolveVariantSprite(portrait, defaultExprDef, variant);
-                                }
-                                var tex = TexManager.GetOrLoad(speakerName, __result, resolvedSprite, portrait.FrameSize, portrait.Columns);
-                                if (tex != null)
-                                    __instance.speaker.Portrait = tex;
-                            }
-                            __result = state.CurrentFrame;
-                        }
-                        else
-                        {
-                            if (!string.IsNullOrWhiteSpace(portrait.Sprite))
-                            {
-                                var dummyExpr = new ExpressionDefinition { Sprite = portrait.Sprite };
-                                string resolvedSprite = ResolveVariantSprite(portrait, dummyExpr, variant);
-                                var tex = TexManager.GetOrLoad(speakerName, -1, resolvedSprite, portrait.FrameSize, portrait.Columns);
-                                if (tex != null)
-                                    __instance.speaker.Portrait = tex;
-                            }
-
-                            __result = state.GetAbsoluteFrameIndex();
-                        }
-                    }
-                }
-                return;
+                Instance.ProcessDialogueBox(dialogueBox, advanceAnimation: false);
             }
 
-            // Normal path — UpdateTicked has registered this NPC
-            LastVanillaPortraitIndex = __result;
-
-            if (IsAnimating && CurrentAnimatedFrameIndex >= 0)
+            if (IsAnimating && CurrentAnimatedFrameIndex >= 0
+                && string.Equals(CurrentAnimatedNpc, speakerName, StringComparison.OrdinalIgnoreCase))
             {
-                // Patch DDF during draw phase: ActiveData may not have existed yet
-                // during OnUpdateTicked (DDF creates it on first draw), so we retry here.
-                if (PackManager != null && PackManager.Portraits.TryGetValue(speakerName, out var portraitDef))
-                    EnsureDdfPortraitSettings(portraitDef);
-
+                // DDF may only create ActiveData on first draw, so retry the patch here.
+                EnsureDdfPortraitSettings(portrait);
                 __result = CurrentAnimatedFrameIndex;
             }
+        }
+
+        /// <summary>Get the vanilla portrait index for a dialogue, without APF's override.</summary>
+        private static int GetVanillaPortraitIndex(Dialogue dialogue)
+        {
+            _queryingVanillaIndex = true;
+            try
+            {
+                return dialogue.getPortraitIndex();
+            }
+            finally
+            {
+                _queryingVanillaIndex = false;
+            }
+        }
+
+        // ====================================================================
+        // ORIGINAL PORTRAIT TRACKING
+        // ====================================================================
+
+        /// <summary>
+        /// Remember the NPC's real portrait before APF replaces it. If the NPC is somehow still holding
+        /// an APF texture (or a disposed one), let the game pick its normal appearance again first.
+        /// </summary>
+        private static void CaptureOriginalPortrait(NPC speaker)
+        {
+            if (speaker == null || _originalPortraits.ContainsKey(speaker.Name))
+                return;
+
+            Texture2D current = speaker.Portrait;
+            if (current == null || current.IsDisposed || TexManager.IsOwned(current))
+            {
+                speaker.Portrait = null;
+                current = speaker.Portrait; // getter calls ChooseAppearance()
+            }
+
+            if (current != null && !TexManager.IsOwned(current))
+                _originalPortraits[speaker.Name] = (speaker, current);
+        }
+
+        /// <summary>Put an NPC's real portrait back, if APF's texture is still on it.</summary>
+        private static void RestoreOriginalPortrait(string npcName)
+        {
+            if (npcName == null)
+                return;
+
+            if (_originalPortraits.TryGetValue(npcName, out var original)
+                && original.Npc != null
+                && (original.Npc.Portrait == null || TexManager.IsOwned(original.Npc.Portrait)))
+            {
+                original.Npc.Portrait = original.Texture;
+            }
+
+            _appliedTextures.Remove(npcName);
+        }
+
+        /// <summary>Apply an APF texture to the speaker, noticing if the game replaced it in the meantime.</summary>
+        private static void ApplyTexture(NPC speaker, Texture2D texture)
+        {
+            if (speaker == null || texture == null)
+                return;
+
+            // If the game swapped the portrait (e.g. ChooseAppearance on a location change),
+            // the new one is the real portrait now.
+            Texture2D current = speaker.Portrait;
+            if (current != null && !current.IsDisposed && !TexManager.IsOwned(current))
+                _originalPortraits[speaker.Name] = (speaker, current);
+
+            if (!ReferenceEquals(current, texture))
+                speaker.Portrait = texture;
+
+            _appliedTextures[speaker.Name] = texture;
         }
 
         // ====================================================================
@@ -1209,8 +1252,8 @@ namespace AnimatedPortraitFramework
         // ====================================================================
 
         /// <summary>
-        /// Detect whether the game engine (Content Patcher / event changePortrait) has set
-        /// a suffixed portrait asset for this NPC (e.g. Portraits/Haley_Pyjamas → "Pyjamas").
+        /// Read the portrait suffix Content Patcher / an event gave this NPC
+        /// (e.g. Portraits/Haley_Pyjamas → "Pyjamas"). Uses the NPC's real portrait, never APF's own texture.
         /// Returns null if the portrait is the base asset or not readable.
         /// </summary>
         private static string DetectCpPortraitSuffix(NPC speaker)
@@ -1219,33 +1262,166 @@ namespace AnimatedPortraitFramework
                 return null;
 
             string name = speaker.Name;
-            string prefixBackPortrait = $"Portraits\\{name}_";
-            string prefixFwdPortrait  = $"Portraits/{name}_";
+            string textureName = null;
 
-            // Check the portrait texture name first.
-            string textureName = speaker.Portrait?.Name;
-            if (!string.IsNullOrEmpty(textureName))
-            {
-                if (textureName.StartsWith(prefixBackPortrait, StringComparison.OrdinalIgnoreCase))
-                    return textureName.Substring(prefixBackPortrait.Length);
-                if (textureName.StartsWith(prefixFwdPortrait, StringComparison.OrdinalIgnoreCase))
-                    return textureName.Substring(prefixFwdPortrait.Length);
-            }
+            if (_originalPortraits.TryGetValue(name, out var original))
+                textureName = original.Texture?.Name;
+            else if (!TexManager.IsOwned(speaker.Portrait))
+                textureName = speaker.Portrait?.Name;
+
+            string suffix = StripPrefix(textureName, "Portraits", name);
+            if (suffix != null)
+                return suffix;
 
             // Fall back to the overworld texture when the portrait has no suffix.
-            string spriteTextureName = speaker.Sprite?.textureName?.Value;
-            if (!string.IsNullOrEmpty(spriteTextureName))
-            {
-                string prefixBackSprite = $"Characters\\{name}_";
-                string prefixFwdSprite  = $"Characters/{name}_";
+            return StripPrefix(speaker.Sprite?.textureName?.Value, "Characters", name);
+        }
 
-                if (spriteTextureName.StartsWith(prefixBackSprite, StringComparison.OrdinalIgnoreCase))
-                    return spriteTextureName.Substring(prefixBackSprite.Length);
-                if (spriteTextureName.StartsWith(prefixFwdSprite, StringComparison.OrdinalIgnoreCase))
-                    return spriteTextureName.Substring(prefixFwdSprite.Length);
+        /// <summary>"Portraits/Marnie_Rainy" + ("Portraits", "Marnie") → "Rainy".</summary>
+        private static string StripPrefix(string assetName, string folder, string npcName)
+        {
+            if (string.IsNullOrEmpty(assetName))
+                return null;
+
+            foreach (string prefix in new[] { $"{folder}/{npcName}_", $"{folder}\\{npcName}_" })
+            {
+                if (assetName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) && assetName.Length > prefix.Length)
+                    return assetName.Substring(prefix.Length);
             }
 
             return null;
+        }
+
+        /// <summary>
+        /// ContentPatcher mode: work out which variant the game is currently showing for this NPC,
+        /// from its real portrait texture (e.g. Portraits/Marnie_Rainy → "Rainy").
+        /// Returns "" for the base portrait or anything APF doesn't recognise.
+        /// </summary>
+        private static string ReadGamePortraitVariant(NPC speaker, PortraitDefinition portrait)
+        {
+            string name = speaker.Name;
+
+            Texture2D real = _originalPortraits.TryGetValue(name, out var original)
+                ? original.Texture
+                : (TexManager.IsOwned(speaker.Portrait) ? null : speaker.Portrait);
+            if (real == null || real.IsDisposed)
+                return "";
+
+            // Portraits are named after the NPC's texture name, which is usually (not always) their internal name.
+            string textureName = NPC.getTextureNameForCharacter(name);
+
+            // 1. By asset name. The game names the texture when it loads a portrait from
+            //    Data/Characters (Appearance entries or the default Portraits/{NPC}).
+            string assetName = real.Name;
+            if (!string.IsNullOrEmpty(assetName))
+            {
+                if (IsSameAsset(assetName, $"Portraits/{textureName}"))
+                    return "";
+
+                string suffix = StripPrefix(assetName, "Portraits", textureName) ?? StripPrefix(assetName, "Portraits", name);
+                if (suffix != null)
+                    return suffix;
+            }
+
+            // 2. By identity. An event's changePortrait loads Portraits/{NPC}_{suffix} without naming the
+            //    texture, so compare it with the portrait asset of each variant this NPC has.
+            foreach (string variant in GetKnownVariants(portrait))
+            {
+                string candidate = $"Portraits/{textureName}_{variant}";
+                try
+                {
+                    if (Game1.content.DoesAssetExist<Texture2D>(candidate)
+                        && ReferenceEquals(Game1.content.Load<Texture2D>(candidate), real))
+                        return variant;
+                }
+                catch (Exception ex)
+                {
+                    ModMonitor.Log($"Couldn't check '{candidate}': {ex.Message}", LogLevel.Trace);
+                }
+            }
+
+            return "";
+        }
+
+        /// <summary>Every variant name a portrait definition mentions (VariantExpressions, Variants, rule roots).</summary>
+        private static IEnumerable<string> GetKnownVariants(PortraitDefinition portrait)
+        {
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            if (portrait.VariantExpressions != null)
+                foreach (string key in portrait.VariantExpressions.Keys)
+                    if (seen.Add(key)) yield return key;
+
+            if (portrait.Variants != null)
+                foreach (string key in portrait.Variants)
+                    if (!string.IsNullOrWhiteSpace(key) && seen.Add(key)) yield return key;
+
+            if (PackManager.Rules.TryGetValue(portrait.Target, out var rules))
+                foreach (var rule in rules)
+                    if (!string.IsNullOrWhiteSpace(rule.Root) && seen.Add(rule.Root)) yield return rule.Root;
+        }
+
+        /// <summary>Compare two asset names, ignoring case and slash direction.</summary>
+        private static bool IsSameAsset(string a, string b)
+        {
+            return string.Equals(a?.Replace('\\', '/'), b?.Replace('\\', '/'), StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
+        /// ContentPatcher mode: ask the game to re-pick the NPC's appearance (Data/Characters Appearance
+        /// entries) right now. Normally it only does that when the NPC changes location, so a time-based
+        /// outfit would lag behind. Skipped during events, which control portraits themselves.
+        /// </summary>
+        private static void RefreshAppearance(NPC speaker)
+        {
+            if (Game1.eventUp || !speaker.AllowDynamicAppearance || speaker.currentLocation == null)
+                return;
+
+            try
+            {
+                speaker.ChooseAppearance();
+            }
+            catch (Exception ex)
+            {
+                ModMonitor.Log($"Couldn't refresh {speaker.Name}'s appearance: {ex.Message}", LogLevel.Trace);
+            }
+        }
+
+        /// <summary>
+        /// Pick the variant for a new dialogue.
+        /// ContentPatcher mode: whatever portrait the game/Content Patcher gave the NPC. Rules can then roll a sub-variant.
+        /// APF mode: the original built-in logic (<see cref="DetermineVariant"/>).
+        /// </summary>
+        private static string ResolveSessionVariant(PortraitDefinition portrait, NPC speaker)
+        {
+            string name = speaker.Name;
+
+            if (portrait.IsContentPatcherControlled)
+            {
+                string chosen = TextureManager.NormalizeVariant(ReadGamePortraitVariant(speaker, portrait));
+                string result = chosen == "" ? "" : ApplyEvaluatedVariant(portrait, chosen);
+
+                string realName = _originalPortraits.TryGetValue(name, out var original) ? original.Texture?.Name : null;
+                ModMonitor.Log(
+                    chosen == ""
+                        ? $"[CP-SYNC] {name}: game portrait '{realName ?? "?"}' → base expressions."
+                        : $"[CP-SYNC] {name}: game portrait '{realName ?? "?"}' → variant '{chosen}'" + (string.Equals(result, chosen, StringComparison.OrdinalIgnoreCase) ? "." : $", rolled '{result}'."),
+                    LogLevel.Debug);
+                return result;
+            }
+
+            string cpSuffix = DetectCpPortraitSuffix(speaker);
+            if (cpSuffix != null)
+            {
+                _cpVariantOverrides[name] = cpSuffix;
+                ModMonitor.Log($"[CP-SYNC] Detected CP portrait suffix '{cpSuffix}' for {name}", LogLevel.Debug);
+            }
+            else
+            {
+                _cpVariantOverrides.Remove(name);
+            }
+
+            return DetermineVariant(portrait, _cpVariantOverrides.GetValueOrDefault(name));
         }
 
         /// <summary>
@@ -1519,209 +1695,188 @@ namespace AnimatedPortraitFramework
             if (Game1.activeClickableMenu is DialogueBox dialogueBox
                 && dialogueBox.characterDialogue?.speaker != null)
             {
-                string speakerName = dialogueBox.characterDialogue.speaker.Name;
-
-                if (PackManager.Portraits.ContainsKey(speakerName) && IsNpcEnabled(speakerName))
-                {
-                    bool justStarted = false;
-                    var portrait = PackManager.Portraits[speakerName];
-
-                    // Detect NEW dialogue (first open, different NPC, or different DialogueBox instance)
-                    if (!IsAnimating || CurrentAnimatedNpc != speakerName || _lastDialogueBox != dialogueBox)
-                    {
-                        justStarted = true;
-                        IsAnimating = true;
-                        CurrentAnimatedNpc = speakerName;
-                        CurrentAnimatedFrameIndex = 0;
-                        LastVanillaPortraitIndex = -1;
-                        _lastDialogueBox = dialogueBox;
-                        _dialogueTickCount = 0;
-
-                        if (!ActiveAnimations.ContainsKey(speakerName))
-                            ActiveAnimations[speakerName] = new AnimationState(portrait);
-                        else
-                            ActiveAnimations[speakerName].Reset();
-
-                        // Save original portrait for later restoration across all modes
-                        if (!_originalPortraits.ContainsKey(speakerName))
-                            _originalPortraits[speakerName] = dialogueBox.characterDialogue.speaker.Portrait;
-
-                        _ddfPatchedNpc = null;
-                        _ddfPatchedThisSession = false;
-                        _ddfPatchedSessionNpc = null;
-                        _ddfPatchedSessionBox = null;
-
-                        // Detect CP / event portrait suffix BEFORE APF touches the texture.
-                        // e.g. Portraits/Haley_Pyjamas → suffix "Pyjamas"
-                        string cpSuffix = DetectCpPortraitSuffix(dialogueBox.characterDialogue.speaker);
-                        if (cpSuffix != null)
-                        {
-                            _cpVariantOverrides[speakerName] = cpSuffix;
-                            this.Monitor.Log($"[CP-SYNC] Detected CP portrait suffix '{cpSuffix}' for {speakerName}", LogLevel.Debug);
-                        }
-                        else
-                        {
-                            _cpVariantOverrides.Remove(speakerName);
-                        }
-
-                        // Determine and set the active variant (Season / Location / Weather / CP suffix)
-                        string variant = DetermineVariant(portrait, _cpVariantOverrides.GetValueOrDefault(speakerName));
-                        bool variantChanged = TexManager.SetActiveVariant(speakerName, variant);
-                        if (variantChanged)
-                            _currentExprLoaded.Remove(speakerName); // force texture reload
-
-                        string modeStr = portrait.IsPerExpressionMode ? "per-expr" : "single-sheet";
-                        string variantLabel = string.IsNullOrEmpty(variant) ? "default" : variant;
-                        this.Monitor.Log($"[SETUP] New dialogue for {speakerName} (cols={portrait.Columns}, mode={modeStr}, variant={variantLabel})", LogLevel.Debug);
-
-                        // Activate an optional body-change animation on the trigger dialogue itself.
-                        if (_activeBodyChange.TryGetValue(speakerName, out var bodyChangeDef))
-                        {
-                            ActiveAnimations[speakerName].BodyChangeOverride = bodyChangeDef;
-
-                            // Load and set the body-change sprite texture
-                            if (!string.IsNullOrWhiteSpace(bodyChangeDef.Sprite))
-                            {
-                                try
-                                {
-                                    var tex = TexManager.GetOrLoad(speakerName, -1, bodyChangeDef.Sprite, portrait.FrameSize, portrait.Columns);
-                                    if (tex != null)
-                                        dialogueBox.characterDialogue.speaker.Portrait = tex;
-                                }
-                                catch (Exception ex)
-                                {
-                                    this.Monitor.Log($"[TRIGGER] Failed to load body-change sprite for {speakerName}: {ex.Message}", LogLevel.Warn);
-                                }
-                            }
-
-                            _activeBodyChange.Remove(speakerName);
-                            this.Monitor.Log($"[TRIGGER] Body-change animation activated for {speakerName} ({bodyChangeDef.TotalFrames} frames, {bodyChangeDef.Fps} FPS, mode={bodyChangeDef.Mode})", LogLevel.Info);
-                        }
-                    }
-                    else
-                    {
-                        // Re-check variant each tick (handles rare mid-dialogue location change)
-                        string variant = DetermineVariant(portrait, _cpVariantOverrides.GetValueOrDefault(speakerName));
-                        if (TexManager.SetActiveVariant(speakerName, variant))
-                            _currentExprLoaded.Remove(speakerName); // force texture reload on variant change
-                    }
-
-                    _dialogueTickCount++;
-                    var state = ActiveAnimations[speakerName];
-
-                    // Actively query the vanilla expression (triggers Harmony postfix)
-                    dialogueBox.characterDialogue.getPortraitIndex();
-                    int vanillaIndex = LastVanillaPortraitIndex >= 0 ? LastVanillaPortraitIndex : 0;
-                    string activeVariant = TexManager.GetActiveVariant(speakerName);
-                    state.SetExpression(vanillaIndex, activeVariant);
-
-                    if (state.IsActive)
-                    {
-                        // Ensure DDF uses our dynamic texture; layout overrides remain optional.
-                        EnsureDdfPortraitSettings(portrait, speakerName, dialogueBox);
-
-                        if (portrait.IsPerExpressionMode)
-                        {
-                            // ── Per-expression mode: swap texture, use local frame index ──
-                            string exprKey = vanillaIndex.ToString();
-                            var activeExprDef = state.ActiveExpression;
-                            if (activeExprDef != null && !string.IsNullOrWhiteSpace(activeExprDef.Sprite))
-                            {
-                                // Swap texture only when expression changes
-                                if (!_currentExprLoaded.TryGetValue(speakerName, out int loadedExpr) || loadedExpr != vanillaIndex)
-                                {
-                                    // If the active expression already came from VariantExpressions, its Sprite
-                                    // path is fully resolved; otherwise fall back to ResolveVariantSprite.
-                                    string resolvedSprite;
-                                    if (!string.IsNullOrEmpty(activeVariant)
-                                        && portrait.VariantExpressions.Count > 0
-                                        && portrait.VariantExpressions.ContainsKey(activeVariant)
-                                        && portrait.VariantExpressions[activeVariant].ContainsKey(exprKey))
-                                    {
-                                        resolvedSprite = portrait.VariantExpressions[activeVariant][exprKey].Sprite;
-                                    }
-                                    else
-                                    {
-                                        // Default exprDef for ResolveVariantSprite when no variant expression override
-                                        var defaultExprDef = portrait.Expressions.ContainsKey(exprKey) ? portrait.Expressions[exprKey] : activeExprDef;
-                                        resolvedSprite = ResolveVariantSprite(portrait, defaultExprDef, activeVariant);
-                                    }
-                                    var tex = TexManager.GetOrLoad(speakerName, vanillaIndex, resolvedSprite, portrait.FrameSize, portrait.Columns);
-                                    if (tex != null)
-                                    {
-                                        dialogueBox.characterDialogue.speaker.Portrait = tex;
-                                        _currentExprLoaded[speakerName] = vanillaIndex;
-                                    }
-                                }
-                            }
-
-                            if (justStarted)
-                            {
-                                CurrentAnimatedFrameIndex = state.CurrentFrame;
-                                double elapsed = Game1.currentGameTime.ElapsedGameTime.TotalMilliseconds;
-                                this.Monitor.Log($"[TICK 0] {speakerName}: vanillaIdx={vanillaIndex} expr={state.CurrentExpression} frame=0 localIndex={CurrentAnimatedFrameIndex} elapsedMs={elapsed:F1} (SKIPPED update, per-expr)", LogLevel.Trace);
-                            }
-                            else
-                            {
-                                bool changed = state.Update(Game1.currentGameTime.ElapsedGameTime.TotalMilliseconds);
-                                CurrentAnimatedFrameIndex = state.CurrentFrame;
-
-                                if (_dialogueTickCount <= 5 || (changed && _dialogueTickCount <= 20))
-                                    this.Monitor.Log($"[TICK {_dialogueTickCount}] {speakerName}: vanillaIdx={vanillaIndex} expr={state.CurrentExpression} localFrame={state.CurrentFrame} localIndex={CurrentAnimatedFrameIndex}", LogLevel.Trace);
-                            }
-                        }
-                        else
-                        {
-                            // ── Single-sheet mode: absolute frame index ──
-                            if (!string.IsNullOrWhiteSpace(portrait.Sprite))
-                            {
-                                if (!_currentExprLoaded.TryGetValue(speakerName, out int loadedExpr) || loadedExpr != -1)
-                                {
-                                    var dummyExpr = new ExpressionDefinition { Sprite = portrait.Sprite };
-                                    string resolvedSprite = ResolveVariantSprite(portrait, dummyExpr, activeVariant);
-                                    var tex = TexManager.GetOrLoad(speakerName, -1, resolvedSprite, portrait.FrameSize, portrait.Columns);
-                                    if (tex != null)
-                                    {
-                                        dialogueBox.characterDialogue.speaker.Portrait = tex;
-                                        _currentExprLoaded[speakerName] = -1;
-                                    }
-                                }
-                            }
-
-                            if (justStarted)
-                            {
-                                CurrentAnimatedFrameIndex = state.GetAbsoluteFrameIndex();
-                                double elapsed = Game1.currentGameTime.ElapsedGameTime.TotalMilliseconds;
-                                this.Monitor.Log($"[TICK 0] {speakerName}: vanillaIdx={vanillaIndex} expr={state.CurrentExpression} frame=0 absIndex={CurrentAnimatedFrameIndex} elapsedMs={elapsed:F1} (SKIPPED update)", LogLevel.Trace);
-                            }
-                            else
-                            {
-                                bool changed = state.Update(Game1.currentGameTime.ElapsedGameTime.TotalMilliseconds);
-                                CurrentAnimatedFrameIndex = state.GetAbsoluteFrameIndex();
-
-                                if (_dialogueTickCount <= 5 || (changed && _dialogueTickCount <= 20))
-                                    this.Monitor.Log($"[TICK {_dialogueTickCount}] {speakerName}: vanillaIdx={vanillaIndex} expr={state.CurrentExpression} localFrame={state.CurrentFrame} absIndex={CurrentAnimatedFrameIndex}", LogLevel.Trace);
-                            }
-                        }
-                    }
-                    else
-                    {
-                        CurrentAnimatedFrameIndex = -1;
-                        if (justStarted)
-                            this.Monitor.Log($"[TICK 0] {speakerName}: vanillaIdx={vanillaIndex} — expression {vanillaIndex} NOT configured, passthrough", LogLevel.Debug);
-                    }
-                }
-                else
-                {
-                    if (IsAnimating)
-                        CleanupDialogue();
-                }
+                this.ProcessDialogueBox(dialogueBox, advanceAnimation: true);
             }
             else if (IsAnimating)
             {
                 CleanupDialogue();
             }
         }
+
+        /// <summary>
+        /// Keep APF's portrait in sync with a dialogue box: start a session for a new box,
+        /// pick the texture for the current expression and advance the animation.
+        /// Called every tick, and from the getPortraitIndex postfix if the box is drawn before the first tick.
+        /// </summary>
+        /// <param name="dialogueBox">The dialogue box currently shown.</param>
+        /// <param name="advanceAnimation">Whether to advance animation time (only once per tick).</param>
+        internal void ProcessDialogueBox(DialogueBox dialogueBox, bool advanceAnimation)
+        {
+            NPC speaker = dialogueBox.characterDialogue.speaker;
+            string speakerName = speaker.Name;
+
+            if (!PackManager.Portraits.TryGetValue(speakerName, out var portrait) || !IsNpcEnabled(speakerName))
+            {
+                if (IsAnimating)
+                    CleanupDialogue();
+                return;
+            }
+
+            bool justStarted = false;
+
+            // Detect NEW dialogue (first open, different NPC, or different DialogueBox instance)
+            if (!IsAnimating
+                || !string.Equals(CurrentAnimatedNpc, speakerName, StringComparison.OrdinalIgnoreCase)
+                || !ReferenceEquals(_lastDialogueBox, dialogueBox))
+            {
+                // A different NPC was talking in the previous box: give them their portrait back.
+                if (IsAnimating && !string.Equals(CurrentAnimatedNpc, speakerName, StringComparison.OrdinalIgnoreCase))
+                    CleanupDialogue();
+
+                justStarted = true;
+                IsAnimating = true;
+                CurrentAnimatedNpc = speakerName;
+                CurrentAnimatedFrameIndex = -1;
+                LastVanillaPortraitIndex = -1;
+                _lastDialogueBox = dialogueBox;
+                _dialogueTickCount = 0;
+
+                if (!ActiveAnimations.ContainsKey(speakerName))
+                    ActiveAnimations[speakerName] = new AnimationState(portrait);
+                else
+                    ActiveAnimations[speakerName].Reset();
+
+                _ddfPatchedNpc = null;
+                _ddfPatchedThisSession = false;
+                _ddfPatchedSessionNpc = null;
+                _ddfPatchedSessionBox = null;
+
+                // ContentPatcher mode: let the game re-pick the outfit first, so it's current.
+                if (portrait.IsContentPatcherControlled && !_originalPortraits.ContainsKey(speakerName))
+                    RefreshAppearance(speaker);
+
+                // Save the real portrait and read its suffix BEFORE APF touches the texture.
+                CaptureOriginalPortrait(speaker);
+
+                string variant = ResolveSessionVariant(portrait, speaker);
+                TexManager.SetActiveVariant(speakerName, variant);
+
+                string modeStr = portrait.IsPerExpressionMode ? "per-expr" : "single-sheet";
+                string controlStr = portrait.IsContentPatcherControlled ? "ContentPatcher" : "APF";
+                string variantLabel = string.IsNullOrEmpty(variant) ? "default" : variant;
+                this.Monitor.Log($"[SETUP] New dialogue for {speakerName} (cols={portrait.Columns}, mode={modeStr}, control={controlStr}, variant={variantLabel})", LogLevel.Debug);
+
+                // Activate an optional body-change animation on the trigger dialogue itself.
+                if (_activeBodyChange.TryGetValue(speakerName, out var bodyChangeDef))
+                {
+                    ActiveAnimations[speakerName].BodyChangeOverride = bodyChangeDef;
+                    _activeBodyChange.Remove(speakerName);
+                    this.Monitor.Log($"[TRIGGER] Body-change animation activated for {speakerName} ({bodyChangeDef.TotalFrames} frames, {bodyChangeDef.Fps} FPS, mode={bodyChangeDef.Mode})", LogLevel.Info);
+                }
+            }
+            else if (!portrait.IsContentPatcherControlled)
+            {
+                // APF mode: re-check variant each tick (handles rare mid-dialogue location change).
+                // ContentPatcher mode keeps the variant chosen when the dialogue opened.
+                string variant = DetermineVariant(portrait, _cpVariantOverrides.GetValueOrDefault(speakerName));
+                TexManager.SetActiveVariant(speakerName, variant);
+            }
+
+            if (advanceAnimation)
+                _dialogueTickCount++;
+
+            var state = ActiveAnimations[speakerName];
+            int vanillaIndex = GetVanillaPortraitIndex(dialogueBox.characterDialogue);
+            LastVanillaPortraitIndex = vanillaIndex;
+            string activeVariant = TexManager.GetActiveVariant(speakerName);
+            state.SetExpression(vanillaIndex, activeVariant);
+
+            if (!state.HasExpression)
+            {
+                // Expression not configured for this NPC/variant: show the game's own portrait.
+                this.Passthrough(speakerName, justStarted, vanillaIndex, "expression not configured");
+                return;
+            }
+
+            // Pick the texture for this expression + variant.
+            string sprite = ResolveActiveSprite(portrait, state, vanillaIndex, activeVariant);
+            Texture2D texture = sprite != null
+                ? TexManager.GetOrLoad(speakerName, sprite, portrait.FrameSize, portrait.Columns)
+                : null;
+
+            if (texture == null)
+            {
+                // No sprite for this expression (or it failed to load): use the game's portrait.
+                this.Passthrough(speakerName, justStarted, vanillaIndex, sprite == null ? "no sprite" : $"sprite '{sprite}' failed to load");
+                return;
+            }
+
+            // Ensure DDF uses our dynamic texture; layout overrides remain optional.
+            EnsureDdfPortraitSettings(portrait, speakerName, dialogueBox);
+            ApplyTexture(speaker, texture);
+
+            if (advanceAnimation && !justStarted)
+                state.Update(Game1.currentGameTime.ElapsedGameTime.TotalMilliseconds);
+
+            // Per-expression: frame index within this expression's sheet. Single-sheet: index in the combined grid.
+            // A body-change animation always has its own sheet.
+            bool ownSheet = portrait.IsPerExpressionMode || state.BodyChangeOverride != null;
+            CurrentAnimatedFrameIndex = ownSheet ? state.CurrentFrame : state.GetAbsoluteFrameIndex();
+
+            if (justStarted || _dialogueTickCount <= 5)
+                this.Monitor.Log($"[TICK {_dialogueTickCount}] {speakerName}: vanillaIdx={vanillaIndex} expr={state.CurrentExpression} variant={(string.IsNullOrEmpty(activeVariant) ? "default" : activeVariant)} sprite={sprite} frame={CurrentAnimatedFrameIndex}", LogLevel.Trace);
+        }
+
+        /// <summary>Show the game's own portrait for the current expression.</summary>
+        private void Passthrough(string speakerName, bool justStarted, int vanillaIndex, string reason)
+        {
+            RestoreOriginalPortrait(speakerName);
+            CurrentAnimatedFrameIndex = -1;
+            if (justStarted)
+                this.Monitor.Log($"[TICK 0] {speakerName}: vanillaIdx={vanillaIndex} — {reason}, showing the game's portrait", LogLevel.Debug);
+        }
+
+        /// <summary>
+        /// Get the sprite path for the active expression.
+        /// Order: body-change sprite → VariantExpressions sprite → the base expression's per-variant
+        /// override / variant subfolder → the base expression's own sprite. Returns null if none.
+        /// </summary>
+        private static string ResolveActiveSprite(PortraitDefinition portrait, AnimationState state, int vanillaIndex, string variant)
+        {
+            var active = state.ActiveExpression;
+
+            if (state.BodyChangeOverride != null)
+                return string.IsNullOrWhiteSpace(active?.Sprite) ? null : active.Sprite;
+
+            if (!portrait.IsPerExpressionMode)
+            {
+                if (string.IsNullOrWhiteSpace(portrait.Sprite))
+                    return null;
+                return ResolveVariantSprite(portrait, new ExpressionDefinition { Sprite = portrait.Sprite }, variant);
+            }
+
+            if (state.ActiveExpressionIsVariant && !string.IsNullOrWhiteSpace(active?.Sprite))
+                return active.Sprite;
+
+            if (portrait.Expressions.TryGetValue(vanillaIndex.ToString(), out var baseDef) && baseDef != null)
+            {
+                // ResolveVariantSprite checks the disk for variant subfolders, so cache the result.
+                string cacheKey = $"{portrait.Target}|{vanillaIndex}|{variant}";
+                if (!_resolvedSpriteCache.TryGetValue(cacheKey, out string resolved))
+                {
+                    resolved = ResolveVariantSprite(portrait, baseDef, variant);
+                    if (string.IsNullOrWhiteSpace(resolved))
+                        resolved = null;
+                    _resolvedSpriteCache[cacheKey] = resolved;
+                }
+                return resolved;
+            }
+
+            return null;
+        }
+
+        /// <summary>Cached results of <see cref="ResolveVariantSprite"/> for base expressions. Key: "NPC|expression|variant".</summary>
+        private static readonly Dictionary<string, string> _resolvedSpriteCache = new(StringComparer.OrdinalIgnoreCase);
 
         // ====================================================================
         // CONFIG HELPERS
@@ -1840,20 +1995,25 @@ namespace AnimatedPortraitFramework
                     getValue: () => GetPackConfig(capturedPackId).Enabled,
                     setValue: val => GetPackConfig(capturedPackId).Enabled = val
                 );
-                gmcmApi.AddBoolOption(
-                    mod: packManifest,
-                    name: () => "Growth System",
-                    tooltip: () => "Enable heart-based variant progression. When off, all characters use their base look.",
-                    getValue: () => GetPackConfig(capturedPackId).GrowthEnabled,
-                    setValue: val => GetPackConfig(capturedPackId).GrowthEnabled = val
-                );
-                gmcmApi.AddBoolOption(
-                    mod: packManifest,
-                    name: () => "Transition Animations",
-                    tooltip: () => "Show body-change animations when reaching a new heart threshold.",
-                    getValue: () => GetPackConfig(capturedPackId).ShowTransitions,
-                    setValue: val => GetPackConfig(capturedPackId).ShowTransitions = val
-                );
+                // Growth/transition options only matter for NPCs using APF's own variant logic.
+                bool hasApfControlled = npcNames.Any(n => !PackManager.Portraits[n].IsContentPatcherControlled);
+                if (hasApfControlled)
+                {
+                    gmcmApi.AddBoolOption(
+                        mod: packManifest,
+                        name: () => "Growth System",
+                        tooltip: () => "Enable heart-based variant progression. When off, all characters use their base look.",
+                        getValue: () => GetPackConfig(capturedPackId).GrowthEnabled,
+                        setValue: val => GetPackConfig(capturedPackId).GrowthEnabled = val
+                    );
+                    gmcmApi.AddBoolOption(
+                        mod: packManifest,
+                        name: () => "Transition Animations",
+                        tooltip: () => "Show body-change animations when reaching a new heart threshold.",
+                        getValue: () => GetPackConfig(capturedPackId).ShowTransitions,
+                        setValue: val => GetPackConfig(capturedPackId).ShowTransitions = val
+                    );
+                }
 
                 // Per-character settings
                 foreach (string npcName in npcNames)
@@ -1871,6 +2031,10 @@ namespace AnimatedPortraitFramework
                         getValue: () => GetCharConfig(capturedPackId, npc).Enabled,
                         setValue: val => GetCharConfig(capturedPackId, npc).Enabled = val
                     );
+
+                    // Content Patcher picks the variant for these NPCs, so a lock would only fight it.
+                    if (portrait.IsContentPatcherControlled)
+                        continue;
 
                     // Lock Variant dropdown
                     var variantChoices = new List<string> { "Auto", "" };
@@ -1936,19 +2100,12 @@ namespace AnimatedPortraitFramework
         /// <summary>Reset animation state and restore original portraits when dialogue closes.</summary>
         private void CleanupDialogue()
         {
-            // Restore original portrait textures for per-expression NPCs
-            if (CurrentAnimatedNpc != null && _originalPortraits.TryGetValue(CurrentAnimatedNpc, out var origTex))
-            {
-                // Try to restore via the last dialogue box's speaker
-                if (_lastDialogueBox?.characterDialogue?.speaker != null
-                    && string.Equals(_lastDialogueBox.characterDialogue.speaker.Name, CurrentAnimatedNpc, StringComparison.OrdinalIgnoreCase))
-                {
-                    _lastDialogueBox.characterDialogue.speaker.Portrait = origTex;
-                }
-                _originalPortraits.Remove(CurrentAnimatedNpc);
-            }
+            // Give every NPC APF touched in this dialogue their real portrait back.
+            foreach (string npc in _originalPortraits.Keys.ToList())
+                RestoreOriginalPortrait(npc);
+            _originalPortraits.Clear();
+            _appliedTextures.Clear();
 
-            _currentExprLoaded.Remove(CurrentAnimatedNpc ?? "");
             _cpVariantOverrides.Remove(CurrentAnimatedNpc ?? "");
             RestoreDdfOriginals();
             _ddfPatchedNpc = null;

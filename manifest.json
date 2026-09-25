@@ -1,7 +1,7 @@
 {
     "Name": "Animated Portrait Framework APF",
     "Author": "tyr4ntx",
-    "Version": "1.3.0",
+    "Version": "1.4.0",
     "Description": "Framework for animated NPC portraits and conditional overworld sprite variants in Stardew Valley. Modders create simple Content Packs — no coding required.",
     "UniqueID": "tyr4ntx.AnimatedPortraitFramework",
     "EntryDll": "AnimatedPortraitFramework.dll",

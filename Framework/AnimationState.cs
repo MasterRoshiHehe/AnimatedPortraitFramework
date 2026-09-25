@@ -36,6 +36,15 @@ namespace AnimatedPortraitFramework.Framework
         /// <summary>Returns the active expression definition (may be variant-specific).</summary>
         public ExpressionDefinition ActiveExpression => this.activeExpr;
 
+        /// <summary>
+        /// Whether the current expression is configured at all. Unlike <see cref="IsActive"/>,
+        /// this stays true after a "once" animation finished and is holding its final frame.
+        /// </summary>
+        public bool HasExpression => this.activeExpr != null;
+
+        /// <summary>Whether <see cref="ActiveExpression"/> came from VariantExpressions (rather than the base Expressions).</summary>
+        public bool ActiveExpressionIsVariant { get; private set; }
+
         /// <summary>The variant that was active when the expression was last set.</summary>
         private string activeVariant = "";
 
@@ -65,10 +74,11 @@ namespace AnimatedPortraitFramework.Framework
 
             // Try variant-specific expression config first, fall back to default
             this.activeExpr = null;
-            if (!string.IsNullOrEmpty(variant) && this.Portrait.VariantExpressions.Count > 0)
+            if (!string.IsNullOrEmpty(variant) && this.Portrait.VariantExpressions?.Count > 0)
             {
                 this.activeExpr = ResolveVariantExpression(key, variant);
             }
+            this.ActiveExpressionIsVariant = this.activeExpr != null;
             this.activeExpr ??= this.Portrait.Expressions.ContainsKey(key)
                 ? this.Portrait.Expressions[key]
                 : null;
@@ -207,6 +217,8 @@ namespace AnimatedPortraitFramework.Framework
             this.OneShotFinished = false;
             this.CurrentExpression = -1;
             this.activeExpr = null;
+            this.ActiveExpressionIsVariant = false;
+            this.activeVariant = "";
             this.BodyChangeOverride = null;
         }
     }

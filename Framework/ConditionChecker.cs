@@ -71,10 +71,8 @@ namespace AnimatedPortraitFramework.Framework
 
         private static bool CheckRandom(ConditionDefinition condition, string npcName, string rootVariant)
         {
-            int seed = HashCode.Combine(
-                StringComparer.OrdinalIgnoreCase.GetHashCode(npcName),
-                StringComparer.OrdinalIgnoreCase.GetHashCode(rootVariant),
-                (int)Game1.stats.DaysPlayed);
+            // Salted so a Random condition doesn't roll the same number as the weighted pick.
+            int seed = VariantEvaluator.DailySeed(npcName, rootVariant + "|random-condition");
             return new Random(seed).NextDouble() <= condition.Chance;
         }
 

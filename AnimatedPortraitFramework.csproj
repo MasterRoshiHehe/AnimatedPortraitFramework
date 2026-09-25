@@ -4,6 +4,7 @@
     <TargetFramework>net6.0</TargetFramework>
     <EnableHarmony>true</EnableHarmony>
     <BundleExtraAssemblies>ThirdParty</BundleExtraAssemblies>
+    <EnableModDeploy>false</EnableModDeploy>
   </PropertyGroup>
 
   <ItemGroup>

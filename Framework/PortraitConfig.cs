@@ -12,6 +12,20 @@ namespace AnimatedPortraitFramework.Framework
         public string Format { get; set; } = "1.0.0";
 
         /// <summary>
+        /// Who decides which variant (outfit) an NPC uses. Applies to every portrait in this pack
+        /// unless a portrait sets its own <see cref="PortraitDefinition.VariantControl"/>.
+        /// Only read from the pack's main content.json, not from included files.
+        /// <list type="bullet">
+        ///   <item><c>"APF"</c> (default): APF picks variants itself from season, weather, location and hearts, with heart triggers and the GMCM variant lock.</item>
+        ///   <item><c>"ContentPatcher"</c>: the game / Content Patcher decides the variant. APF looks at the portrait the
+        ///   game gave the NPC (e.g. <c>Portraits/Marnie_Rainy</c> from an Appearance entry → variant <c>Rainy</c>) and shows
+        ///   its own image for it. APF's season/weather/location/hearts logic, heart triggers and the GMCM variant lock
+        ///   are switched off. Rules (weighted random sub-variants) still apply.</item>
+        /// </list>
+        /// </summary>
+        public string VariantControl { get; set; }
+
+        /// <summary>
         /// Optional list of additional JSON files to load, relative to the content pack folder
         /// (e.g. "assets/Patches/Haley.json"). Each file uses the same format as content.json
         /// and may itself include further files. Portraits from included files are appended
@@ -33,6 +47,16 @@ namespace AnimatedPortraitFramework.Framework
     {
         /// <summary>NPC internal name (e.g. "Haley").</summary>
         public string Target { get; set; } = "";
+
+        /// <summary>
+        /// Who decides which variant this NPC uses: "APF" (default) or "ContentPatcher".
+        /// If omitted, the pack-level <see cref="ContentPackData.VariantControl"/> is used.
+        /// </summary>
+        public string VariantControl { get; set; }
+
+        /// <summary>Whether variants for this NPC are chosen by Content Patcher instead of APF's built-in logic.</summary>
+        public bool IsContentPatcherControlled =>
+            string.Equals(this.VariantControl?.Trim(), "ContentPatcher", System.StringComparison.OrdinalIgnoreCase);
 
         /// <summary>
         /// Path to a single combined spritesheet PNG (legacy single-sheet mode).
