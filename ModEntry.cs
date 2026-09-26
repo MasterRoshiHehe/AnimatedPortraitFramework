@@ -176,11 +176,13 @@ namespace AnimatedPortraitFramework
             helper.Events.GameLoop.SaveLoaded += this.OnSaveLoaded;
             helper.Events.GameLoop.DayStarted += this.OnDayStarted;
             helper.Events.GameLoop.Saving += this.OnSaving;
+            helper.Events.GameLoop.UpdateTicking += this.OnUpdateTicking;
             helper.Events.GameLoop.UpdateTicked += this.OnUpdateTicked;
             helper.Events.Player.Warped += this.OnWarped;
             helper.Events.GameLoop.TimeChanged += this.OnTimeChanged;
             helper.Events.GameLoop.ReturnedToTitle += this.OnReturnedToTitle;
             helper.Events.Content.AssetRequested += this.OnAssetRequested;
+            helper.Events.Content.AssetsInvalidated += this.OnAssetsInvalidated;
 
             this.Monitor.Log("Animated Portrait Framework initialized.", LogLevel.Info);
         }
@@ -198,6 +200,9 @@ namespace AnimatedPortraitFramework
         private void OnSaveLoaded(object sender, SaveLoadedEventArgs e)
         {
             _carryOverMorning.Clear(); // DayStarted refills it
+            EventOutfits.Reset();
+            VariantAssets.Clear();
+            _variantAssetsDirty = false;
             // Reload packs and invalidate caches so textures + DDF data refresh
             this.LoadContentPacks();
             this.InvalidateAssets();
@@ -215,6 +220,7 @@ namespace AnimatedPortraitFramework
             ActiveAnimations.Clear();
             ActiveVariantCache.Clear();
             _resolvedSpriteCache.Clear();
+            EventOutfits.Rebuild(PackManager);
 
             // Check if any portrait has DDF settings to inject
             _hasDdfConfig = false;
@@ -255,6 +261,10 @@ namespace AnimatedPortraitFramework
 
         private void OnDayStarted(object sender, DayStartedEventArgs e)
         {
+            // Re-check which outfits Content Patcher loads today, before anything rolls (incl. CarryOver's yesterday roll).
+            VariantAssets.Clear();
+            _variantAssetsDirty = false;
+
             ActiveVariantCache.Clear();
             _pendingTriggerDialogue.Clear();
             _pendingTriggerVariant.Clear();
@@ -375,6 +385,109 @@ namespace AnimatedPortraitFramework
         private void OnReturnedToTitle(object sender, ReturnedToTitleEventArgs e)
         {
             _carryOverMorning.Clear();
+            VariantAssets.Clear();
+            _variantAssetsDirty = false;
+
+            // Left mid-event: put the event roots back to normal.
+            EventKind previous = EventOutfits.Current;
+            EventOutfits.Reset();
+            if (previous != EventKind.None)
+                this.RefreshEventRoots(previous, EventKind.None);
+        }
+
+        /// <summary>Set when a portrait asset was invalidated mid-day: re-roll the overworld sprites on the next tick.</summary>
+        private static bool _variantAssetsDirty;
+
+        /// <summary>
+        /// A portrait asset changed (e.g. Content Patcher turned an outfit on or off after a GMCM change): forget which
+        /// sub-variants exist, and re-roll the overworld sprites once on the next tick so they follow.
+        /// Doesn't loop: re-rolling only ever invalidates Characters/* assets.
+        /// </summary>
+        private void OnAssetsInvalidated(object sender, AssetsInvalidatedEventArgs e)
+        {
+            foreach (IAssetName name in e.NamesWithoutLocale)
+            {
+                if (name.StartsWith("Portraits/"))
+                {
+                    VariantAssets.Clear();
+                    _variantAssetsDirty = true;
+                    return;
+                }
+            }
+        }
+
+        // ====================================================================
+        // EVENTS (VariantEvents: cutscene / festival behaviour per root)
+        // ====================================================================
+
+        /// <summary>
+        /// Before the game updates: if the player started or finished watching a cutscene or festival, refresh the
+        /// sprite roots that behave differently during it. Only a reference/flag check per tick.
+        /// </summary>
+        private void OnUpdateTicking(object sender, UpdateTickingEventArgs e)
+        {
+            // Loaded textures are shared by all split-screen players, so only the main screen drives them.
+            if (!EventOutfits.HasAny || !Context.IsWorldReady || Context.ScreenId != 0)
+                return;
+
+            if (EventOutfits.Update(out EventKind previous))
+                this.RefreshEventRoots(previous, EventOutfits.Current);
+        }
+
+        /// <summary>
+        /// Invalidate every Characters/{NPC}_{Root} whose VariantEvents settings differ between the two event kinds.
+        /// SMAPI reloads each one (running <see cref="OnAssetRequested"/> with the new event kind) and copies the result
+        /// into the already-loaded texture, so the overworld NPC and every event actor using that sheet update together,
+        /// even if the new sheet has a different size.
+        /// </summary>
+        private void RefreshEventRoots(EventKind previous, EventKind current)
+        {
+            int refreshed = 0;
+            foreach (var (npc, root) in EventOutfits.Roots)
+            {
+                if (!PackManager.Portraits.TryGetValue(npc, out var portrait))
+                    continue;
+
+                if (EventOutfits.GetBehavior(portrait, root, previous, this.Helper.ModRegistry) == null
+                    && EventOutfits.GetBehavior(portrait, root, current, this.Helper.ModRegistry) == null)
+                    continue;
+
+                if (this.Helper.GameContent.InvalidateCache(EventOutfits.RootAsset(npc, root)))
+                    refreshed++;
+            }
+
+            string eventId = Game1.CurrentEvent?.id;
+            this.Monitor.Log(
+                $"[EVENTS] {previous} → {current}{(current != EventKind.None && eventId != null ? $" (event '{eventId}')" : "")}: refreshed {refreshed} loaded sprite root(s).",
+                LogLevel.Debug);
+        }
+
+        /// <summary>Last portrait-skip log line key, so APF mode's per-tick check doesn't spam the log.</summary>
+        private static string _lastPortraitSkipLog;
+
+        /// <summary>
+        /// Pick the portrait variant for a root: the rolled Rules sub-variant, or the root itself while a
+        /// cutscene/festival with <c>SkipRolledPortrait</c> is running.
+        /// </summary>
+        private static string ResolvePortraitRoll(PortraitDefinition portrait, string root)
+        {
+            if (!string.IsNullOrEmpty(root))
+            {
+                EventKind kind = EventOutfits.ReadLive();
+                if (EventOutfits.GetBehavior(portrait, root, kind, Instance.Helper.ModRegistry)?.SkipRolledPortrait == true)
+                {
+                    // APF mode re-checks every tick, so only log when it changes.
+                    string logKey = $"{portrait.Target}|{root}|{kind}";
+                    if (logKey != _lastPortraitSkipLog)
+                    {
+                        _lastPortraitSkipLog = logKey;
+                        ModMonitor.Log($"[EVENTS] {portrait.Target}/{root}: {kind}, SkipRolledPortrait → using the root's own portrait.", LogLevel.Debug);
+                    }
+                    return root;
+                }
+            }
+
+            return ApplyEvaluatedVariant(portrait, root);
         }
 
         // ====================================================================
@@ -710,6 +823,10 @@ namespace AnimatedPortraitFramework
             // the pipeline so extended animation rows from other edits are preserved.
             if (e.NameWithoutLocale.Name.StartsWith("Characters/", StringComparison.OrdinalIgnoreCase))
             {
+                // Cutscene / festival running: this root may use its own sheet or an event sheet instead.
+                if (this.TryApplyEventSprite(e))
+                    return;
+
                 foreach (var (npc, root) in ActiveVariantCache.Keys)
                 {
                     string rootAsset = $"Characters/{npc}_{root}";
@@ -756,6 +873,58 @@ namespace AnimatedPortraitFramework
                     }
                 }, AssetEditPriority.Early);
             }
+        }
+
+        /// <summary>
+        /// If a cutscene or festival is running and this is a root with VariantEvents for it, apply that behaviour:
+        /// paint the event <c>Sprite</c> over the root, or leave the root untouched (<c>SkipRolledSprite</c>).
+        /// Returns true if the rolled sub-variant overlay must not be applied.
+        /// </summary>
+        private bool TryApplyEventSprite(AssetRequestedEventArgs e)
+        {
+            if (!EventOutfits.HasAny || !EventOutfits.TryGetRoot(e.NameWithoutLocale.Name, out string npc, out string root))
+                return false;
+
+            // The tracked kind (main screen), not the live one: the sheets are shared between split-screen players,
+            // and RefreshEventRoots reloads them as soon as the kind changes.
+            EventKind kind = EventOutfits.Current;
+            if (kind == EventKind.None || !PackManager.Portraits.TryGetValue(npc, out var portrait))
+                return false;
+
+            var behavior = EventOutfits.GetBehavior(portrait, root, kind, this.Helper.ModRegistry);
+            if (behavior == null)
+                return false;
+
+            string sprite = behavior.Sprite?.Trim().Replace('\\', '/');
+            if (!string.IsNullOrEmpty(sprite) && !sprite.Equals(e.NameWithoutLocale.Name, StringComparison.OrdinalIgnoreCase))
+            {
+                var spriteName = this.Helper.GameContent.ParseAssetName(sprite);
+                if (this.Helper.GameContent.DoesAssetExist<Texture2D>(spriteName))
+                {
+                    e.Edit(asset =>
+                    {
+                        var image = asset.AsImage();
+                        var eventSheet = this.Helper.GameContent.Load<Texture2D>(spriteName);
+                        image.ExtendImage(
+                            minWidth: Math.Max(image.Data.Width, eventSheet.Width),
+                            minHeight: Math.Max(image.Data.Height, eventSheet.Height));
+                        image.PatchImage(eventSheet);
+                    }, AssetEditPriority.Late);
+
+                    this.Monitor.Log($"[EVENTS] {npc}/{root}: {kind} → using event sheet '{sprite}'.", LogLevel.Trace);
+                    return true;
+                }
+
+                this.Monitor.Log($"[EVENTS] {npc}/{root}: event sheet '{sprite}' doesn't exist, ignoring it.", LogLevel.Trace);
+            }
+
+            if (behavior.SkipRolledSprite)
+            {
+                this.Monitor.Log($"[EVENTS] {npc}/{root}: {kind} → SkipRolledSprite, using the root's own sheet.", LogLevel.Trace);
+                return true;
+            }
+
+            return false;
         }
 
         /// <summary>Inject DDF entries using the plain dictionary approach (old DDF API).</summary>
@@ -1529,7 +1698,7 @@ namespace AnimatedPortraitFramework
             if (portrait.IsContentPatcherControlled)
             {
                 string chosen = TextureManager.NormalizeVariant(ReadGamePortraitVariant(speaker, portrait));
-                string result = chosen == "" ? "" : ApplyEvaluatedVariant(portrait, chosen);
+                string result = chosen == "" ? "" : ResolvePortraitRoll(portrait, chosen);
 
                 string realName = _originalPortraits.TryGetValue(name, out var original) ? original.Texture?.Name : null;
                 ModMonitor.Log(
@@ -1579,7 +1748,7 @@ namespace AnimatedPortraitFramework
                 foreach (var v in portrait.Variants)
                 {
                     if (v.Equals(cpSuffixOverride, StringComparison.OrdinalIgnoreCase))
-                        return ApplyEvaluatedVariant(portrait, v);
+                        return ResolvePortraitRoll(portrait, v);
                 }
 
                 // A suffixed variant such as "Beach_BlackTube" can inherit its parent variant.
@@ -1590,7 +1759,7 @@ namespace AnimatedPortraitFramework
                     foreach (var v in portrait.Variants)
                     {
                         if (v.Equals(parentVariant, StringComparison.OrdinalIgnoreCase))
-                            return ApplyEvaluatedVariant(portrait, v);
+                            return ResolvePortraitRoll(portrait, v);
                     }
                 }
 
@@ -1603,7 +1772,7 @@ namespace AnimatedPortraitFramework
             {
                 string locked = GetLockedVariant(portrait.Target);
                 if (locked != null)
-                    return ApplyEvaluatedVariant(portrait, locked);  // "" = base, "Hearts10" = specific variant
+                    return ResolvePortraitRoll(portrait, locked);  // "" = base, "Hearts10" = specific variant
             }
 
             // ── Axis 1: Context (Location / Weather / Season) ──
@@ -1646,7 +1815,7 @@ namespace AnimatedPortraitFramework
             else if (!string.IsNullOrEmpty(hearts))
                 resolvedRoot = hearts;
 
-            return ApplyEvaluatedVariant(portrait, resolvedRoot);
+            return ResolvePortraitRoll(portrait, resolvedRoot);
         }
 
         private static string ApplyEvaluatedVariant(PortraitDefinition portrait, string resolvedRoot)
@@ -1785,6 +1954,13 @@ namespace AnimatedPortraitFramework
         {
             if (!Context.IsWorldReady)
                 return;
+
+            // Outfit assets changed mid-day: let the overworld sprites follow.
+            if (_variantAssetsDirty)
+            {
+                _variantAssetsDirty = false;
+                this.EvaluateAllOverworldSprites();
+            }
 
             // Open the preserved normal dialogue after the one-time trigger closes.
             if (_deferredNormalDialogue != null && Game1.activeClickableMenu == null)
@@ -2182,6 +2358,15 @@ namespace AnimatedPortraitFramework
                 getValue: () => L().LightHue,
                 setValue: v => L().LightHue = v,
                 min: 0, max: 100, interval: 5,
+                formatValue: v => $"{v}%"
+            );
+            gmcmApi.AddNumberOption(
+                mod: manifest,
+                name: () => "Light saturation",
+                tooltip: () => "How rich light colors are. 100% = the light's own color, higher = deeper (e.g. a warmer campfire or fireplace), lower = more washed out.",
+                getValue: () => L().LightSaturation,
+                setValue: v => L().LightSaturation = v,
+                min: 0, max: 300, interval: 10,
                 formatValue: v => $"{v}%"
             );
             gmcmApi.AddBoolOption(

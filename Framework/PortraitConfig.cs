@@ -113,6 +113,12 @@ namespace AnimatedPortraitFramework.Framework
         public Dictionary<string, VariantTrigger> VariantTriggers { get; set; } = new();
 
         /// <summary>
+        /// What happens to a variant (root) during cutscenes and festivals.
+        /// Key = root variant name (e.g. "Sweetheart_Summer"). Works whether or not the root has Rules.
+        /// </summary>
+        public Dictionary<string, VariantEventSettings> VariantEvents { get; set; } = new();
+
+        /// <summary>
         /// Resolves the sprite path for an expression, taking the active variant into account.
         /// If a variant subfolder version exists, returns that; otherwise returns the base sprite.
         /// </summary>
@@ -171,6 +177,42 @@ namespace AnimatedPortraitFramework.Framework
         /// If null, no body-change animation is played.
         /// </summary>
         public ExpressionDefinition BodyChange { get; set; }
+    }
+
+    /// <summary>
+    /// Event settings for one root variant: separate behaviour for cutscenes (heart events, the wedding,
+    /// any non-festival event) and festivals (Egg Festival, Flower Dance, Spirit's Eve, ...).
+    /// </summary>
+    public class VariantEventSettings
+    {
+        /// <summary>Behaviour during cutscenes (any event that isn't a festival, including the wedding).</summary>
+        public VariantEventBehavior Cutscenes { get; set; }
+
+        /// <summary>Behaviour during festivals.</summary>
+        public VariantEventBehavior Festivals { get; set; }
+    }
+
+    /// <summary>What APF does with one root variant during one kind of event.</summary>
+    public class VariantEventBehavior
+    {
+        /// <summary>
+        /// Don't paint the rolled Rules sub-variant over the overworld sprite: the NPC uses the root's own sheet
+        /// (whatever Content Patcher loaded for <c>Characters/{NPC}_{Root}</c>).
+        /// </summary>
+        public bool SkipRolledSprite { get; set; }
+
+        /// <summary>Don't use the rolled Rules sub-variant for the dialogue portrait: show the root's own portrait.</summary>
+        public bool SkipRolledPortrait { get; set; }
+
+        /// <summary>
+        /// Optional sprite sheet asset (e.g. "Characters/Caroline_Summer") painted over the root sheet during this
+        /// kind of event, instead of the rolled sub-variant. Use it when the events need animation frames that only
+        /// that sheet has. Ignored if the asset doesn't exist.
+        /// </summary>
+        public string Sprite { get; set; }
+
+        /// <summary>Optional mod UniqueID. If set, this whole block only applies while that mod is installed.</summary>
+        public string RequiresMod { get; set; }
     }
 
     /// <summary>

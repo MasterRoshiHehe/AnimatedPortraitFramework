@@ -30,6 +30,10 @@ APF also supports conditional outfit variants for both portraits and overworld s
 
 - **Portrait lighting.** Dialogue portraits now darken with the world: evenings, nights, rain, caves and the mines. APF reads the game's own lighting, so mods that change sunset times or indoor lighting are followed automatically. Nearby light sources (lamps, torches, campfires, window light, lava, glowing sprites) give brightness back in their own color. Configure it in GMCM. See [Portrait Lighting](#portrait-lighting).
 - **`VariantControl` option.** Set `"VariantControl": "ContentPatcher"` in a pack's `content.json` and APF follows whatever portrait Content Patcher and the game give the NPC (e.g. `Portraits/Marnie_Rainy` → its own `Rainy` images), instead of using its built-in season/weather/hearts logic. See [Letting Content Patcher choose the variant](#letting-content-patcher-choose-the-variant-variantcontrol). Packs without the option work exactly as before.
+- **`VariantEvents` option.** Decide per variant what happens during cutscenes and during festivals (separately): keep the rolled outfit, fall back to the variant's own sprite and/or portrait, or use another mod's sprite sheet so events get the animation frames they need. Works for variants with and without Rules. See [Cutscenes and festivals](#cutscenes-and-festivals-variantevents).
+- **Update checks.** SMAPI now tells you when a new APF version is on Nexus.
+- **Rolls follow your Content Patcher assets.** In `ContentPatcher` mode, a Rules sub-variant is only rolled if a mod loads its portrait, so outfits turned off in your Content Patcher pack are no longer rolled. See [Rolls follow your Content Patcher assets](#rolls-follow-your-content-patcher-assets).
+- **Light saturation** option for portrait lighting, for richer firelight.
 - **`CarryOver` option for Rules.** Add `"CarryOver": true` to a rule and the NPC wakes up in the sub-variant they went to bed in (e.g. last night's pyjamas). Once they change out of that root, today's roll takes over. See [Carry-over](#carry-over-wake-up-in-last-nights-outfit).
 - **Sprite Variant Orchestrator merged into APF.** Native `Rules` (including in `Include` files), conditions (hearts, weather, season, time, location, day of week, mail/event flags, loaded mods), priority + weighted selection with a stable daily roll, late-priority overworld sprite overlays (`Characters/{NPC}_{Root}` ← `Characters/{NPC}_{Root_Suffix}`), and GMCM toggles for every variant. SVO is no longer needed.
 
@@ -200,6 +204,7 @@ You can use any frame size (e.g. 512, 1024). Just make sure `FrameSize` matches.
 | `Columns` | `5` | Number of columns in the spritesheet grid. |
 | `Ddf` | `null` | DDF display settings (see below). If omitted, no DDF config is injected. |
 | `OverrideDdf` | `true` | When `false`, APF does not forcibly overwrite DDF portrait sizing/offsets so another mod can own framing and layout. |
+| `VariantEvents` | `{}` | What each variant does during cutscenes and festivals. See [Cutscenes and festivals](#cutscenes-and-festivals-variantevents). |
 
 ### DDF Settings (optional)
 
@@ -361,6 +366,15 @@ The `Portraits/...` assets must still exist in the game, as always for Appearanc
 - does **not** offer the GMCM "Lock Variant" option;
 - **does** still use `Rules`: if the game shows a variant that is a rule `Root` (e.g. `Beach`), APF rolls one of its sub-variants (e.g. `Beach_PinkSuit`) with the usual priority/weight and a stable daily roll. For random outfits you can also just use `Weight` on Appearance entries.
 
+### Rolls follow your Content Patcher assets
+
+In this mode a Rules sub-variant is only rolled if some mod loads its portrait, `Portraits/{NPC}_{Variant}`. Turn an outfit off in your Content Patcher pack (for example with a config option that removes its `Load` patch) and APF stops rolling it, for both the portrait and the overworld sprite. You don't need an APF setting for it. The root itself (e.g. `Beach`) is always allowed. If nothing else is left, the NPC simply wears the root.
+
+- Changing such an option mid-save (e.g. in GMCM) applies right away: when Content Patcher reloads a portrait, APF re-checks and the overworld sprite follows on the next tick. Otherwise it's re-checked at the start of each day.
+- With `CarryOver`, yesterday's roll is recalculated with today's outfits, so an outfit you just turned off can't come back the next morning.
+- Packs in the default `APF` mode are unaffected.
+- The log shows skipped outfits at Trace level, e.g. `[ROLL] Haley: 'Beach_Example' skipped — Portraits/Haley_Beach_Example isn't loaded by any mod.`
+
 ### Which image is shown
 
 For each expression, APF uses the first of these that exists:
@@ -463,6 +477,48 @@ You don't set any times or conditions for this; when the NPC wears the root is s
 The morning ends when APF notices the NPC's sprite changed: every 10 in-game minutes and whenever you change location. Events and festivals don't count as "getting dressed".
 
 **Known limitation:** yesterday's roll is recalculated with *today's* game state. If the rule's variants have conditions like `Season` or `Weather`, the result can differ from what was actually worn yesterday, e.g. on the first day of a new season. Pyjamas rules normally have no conditions, so in practice this doesn't come up.
+
+### Cutscenes and festivals (`VariantEvents`)
+
+Cutscenes often use animation frames (kisses, hugs, special poses) that only the sprite sheet they were made for has. A rolled sub-variant, or even your own version of the root, may not have those frames. `VariantEvents` tells APF what to do with a variant while the player watches an event.
+
+It goes in the portrait definition, next to `VariantExpressions`, and is keyed by the root variant name. It works whether or not the root has Rules, so it still applies when a player doesn't use your optional random outfits.
+
+```json
+{
+    "Target": "Haley",
+    "VariantEvents": {
+        "Summer": {
+            "Cutscenes": {
+                "SkipRolledSprite": true,
+                "SkipRolledPortrait": true,
+                "Sprite": "Characters/Haley_EventFrames",
+                "RequiresMod": "ExampleAuthor.ExampleMod"
+            },
+            "Festivals": {
+                "SkipRolledSprite": true
+            }
+        }
+    }
+}
+```
+
+`Cutscenes` covers every event that isn't a festival: heart events, the wedding, story cutscenes. `Festivals` covers festivals for their whole duration, including their main event (e.g. the Flower Dance). Leave either out and APF does nothing special during that kind of event.
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `SkipRolledSprite` | `false` | Don't paint the rolled Rules sub-variant over the overworld sprite. The NPC uses the root's own sheet, i.e. whatever Content Patcher loaded for `Characters/{NPC}_{Root}`. |
+| `SkipRolledPortrait` | `false` | Don't use the rolled Rules sub-variant for the dialogue portrait. APF shows the root's own portrait images. Works in both `VariantControl` modes. |
+| `Sprite` | `null` | A sprite sheet asset painted over `Characters/{NPC}_{Root}` during this kind of event, instead of the rolled sub-variant. The sheet may be taller than the root (extra event frames); APF extends the root to fit. If the asset doesn't exist, it's ignored and `SkipRolledSprite` decides. |
+| `RequiresMod` | `null` | A mod's UniqueID. When set, this block only applies while that mod is installed. |
+
+How it works:
+
+- APF checks every tick whether the player started or stopped watching a cutscene or festival. When that changes, it reloads only the affected `Characters/{NPC}_{Root}` sheets. SMAPI updates the already-loaded texture in place, so the event actors and the overworld NPC switch together, even when the event sheet is a different size.
+- Which root the NPC wears during the event is still decided by Content Patcher (e.g. Appearance entries with `IS_EVENT` or `EVENT_ID`). `VariantEvents` only changes what APF does with that root.
+- Everything is decided from the event the local player is watching, so it works in multiplayer without any syncing. Nothing is saved.
+- Festivals that aren't events (Night Market, Desert Festival, Trout Derby, Squidfest) don't count; they're normal days.
+- Split-screen: both screens share the same loaded sprite sheets, so the sprite side follows the main (first) player's screen. Portraits follow each player's own screen. This hasn't been tested.
 
 ## Overworld Sprite Integration (Content Patcher)
 
@@ -582,6 +638,7 @@ Lights only undo darkness; they never make a portrait brighter than normal, so i
 | Light strength | 100% | How strongly lights undo the darkness. 100% = a light right next to the NPC fully restores the portrait. |
 | Light reach | 100% | How far lights reach, compared to how big they look in the game. |
 | Light color | 80% | How much a light's color tints the portrait. 0% = plain white light. |
+| Light saturation | 100% | How rich light colors are. 100% = the light's own color; raise it for deeper firelight (campfires, fireplaces), lower it for more washed-out light. |
 | Player lights | on | Lights carried by players (lantern, glow ring) light up the NPC you're talking to. |
 
 **Not covered:** screen overlays that some graphics mods draw on top of the world themselves (e.g. golden sunset tints or a separate "night tint" layer). APF can't see those; use **Strength** and **Minimum brightness** to match your setup.

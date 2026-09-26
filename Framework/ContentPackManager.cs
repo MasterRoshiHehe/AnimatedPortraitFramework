@@ -213,6 +213,28 @@ namespace AnimatedPortraitFramework.Framework
                                 existingPortrait.VariantTriggers[triggerKvp.Key] = triggerKvp.Value;
                         }
 
+                        // Merge VariantEvents (per root; Cutscenes and Festivals merge separately)
+                        if (portrait.VariantEvents != null)
+                        {
+                            existingPortrait.VariantEvents = ToCaseInsensitive(existingPortrait.VariantEvents);
+                            foreach (var eventKvp in portrait.VariantEvents)
+                            {
+                                if (eventKvp.Value == null)
+                                    continue;
+
+                                if (!existingPortrait.VariantEvents.TryGetValue(eventKvp.Key, out var existingEvents) || existingEvents == null)
+                                {
+                                    existingPortrait.VariantEvents[eventKvp.Key] = eventKvp.Value;
+                                    continue;
+                                }
+
+                                if (eventKvp.Value.Cutscenes != null)
+                                    existingEvents.Cutscenes = eventKvp.Value.Cutscenes;
+                                if (eventKvp.Value.Festivals != null)
+                                    existingEvents.Festivals = eventKvp.Value.Festivals;
+                            }
+                        }
+
                         // Continue resolving the merged definition rather than the discarded fragment.
                         portrait = existingPortrait;
                         this.Monitor.Log($"  Merged additional definitions into existing '{portrait.Target}'.", LogLevel.Trace);
@@ -220,6 +242,7 @@ namespace AnimatedPortraitFramework.Framework
                     else
                     {
                         // First time encountering this target, or a later content pack override.
+                        portrait.VariantEvents = ToCaseInsensitive(portrait.VariantEvents);
                         this.Portraits[portrait.Target] = portrait;
                         this.ContentProviders[portrait.Target] = pack;
                         this.NpcPackIds[portrait.Target] = pack.Manifest.UniqueID;
@@ -308,6 +331,24 @@ namespace AnimatedPortraitFramework.Framework
 
             this.Monitor.Log($"Loaded {this.Portraits.Count} animated portrait(s) total.", LogLevel.Info);
             this.Monitor.Log($"Loaded rules for {this.Rules.Count} NPC(s).", LogLevel.Info);
+        }
+
+        /// <summary>Copy VariantEvents into a dictionary with case-insensitive root names (null → empty).</summary>
+        private static Dictionary<string, VariantEventSettings> ToCaseInsensitive(Dictionary<string, VariantEventSettings> source)
+        {
+            if (source != null && source.Comparer == StringComparer.OrdinalIgnoreCase)
+                return source;
+
+            var result = new Dictionary<string, VariantEventSettings>(StringComparer.OrdinalIgnoreCase);
+            if (source != null)
+            {
+                foreach (var kvp in source)
+                {
+                    if (!string.IsNullOrWhiteSpace(kvp.Key) && kvp.Value != null)
+                        result[kvp.Key.Trim()] = kvp.Value;
+                }
+            }
+            return result;
         }
 
         private List<VariantRule> CollectRules(IContentPack pack, ContentPackData root)

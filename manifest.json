@@ -6,6 +6,7 @@
     "UniqueID": "tyr4ntx.AnimatedPortraitFramework",
     "EntryDll": "AnimatedPortraitFramework.dll",
     "MinimumApiVersion": "4.0.0",
+    "UpdateKeys": [ "Nexus:43364" ],
     "Dependencies": [
         {
             "UniqueID": "Mangupix.DialogueDisplayFrameworkContinued",

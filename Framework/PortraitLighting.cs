@@ -240,6 +240,7 @@ namespace AnimatedPortraitFramework.Framework
             Vector2 target = speaker.getStandingPosition() + new Vector2(0f, -48f);
             float reachMultiplier = Math.Clamp(config.LightReach, 10, 300) / 100f;
             float hue = Math.Clamp(config.LightHue, 0, 100) / 100f;
+            float saturation = Math.Clamp(config.LightSaturation, 0, 300) / 100f;
             Vector3 total = Vector3.Zero;
 
             // Game1.currentLightSources is a Dictionary<string, LightSource> since SDV 1.6.9.
@@ -255,7 +256,7 @@ namespace AnimatedPortraitFramework.Framework
                     if (!config.PlayerLights)
                         continue;
                     if (owner != Game1.player.UniqueMultiplayerID
-                        && !ReferenceEquals(Game1.getFarmerMaybeOffline(owner)?.currentLocation, location))
+                        && !ReferenceEquals(Game1.GetPlayer(owner)?.currentLocation, location))
                         continue;
                 }
 
@@ -276,10 +277,24 @@ namespace AnimatedPortraitFramework.Framework
                 float intensity = closeness * closeness * (color.A / 255f);
 
                 var visible = new Vector3(1f - color.R / 255f, 1f - color.G / 255f, 1f - color.B / 255f);
-                total += Vector3.Lerp(Vector3.One, visible, hue) * intensity;
+                total += Saturate(Vector3.Lerp(Vector3.One, visible, hue), saturation) * intensity;
             }
 
             return total;
+        }
+
+        /// <summary>
+        /// Push a colour away from (saturation &gt; 1) or towards (saturation &lt; 1) its own grey, keeping its brightness.
+        /// Uses Rec. 709 luminance weights. The result is clamped to 0..1 per channel.
+        /// </summary>
+        private static Vector3 Saturate(Vector3 color, float saturation)
+        {
+            if (Math.Abs(saturation - 1f) < 0.001f)
+                return color;
+
+            float luminance = color.X * 0.2126f + color.Y * 0.7152f + color.Z * 0.0722f;
+            var grey = new Vector3(luminance);
+            return Vector3.Clamp(grey + (color - grey) * saturation, Vector3.Zero, Vector3.One);
         }
     }
 }

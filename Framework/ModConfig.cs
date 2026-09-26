@@ -88,6 +88,9 @@ namespace AnimatedPortraitFramework.Framework
         /// <summary>How much a light's colour tints the portrait, in percent (0 = white light only).</summary>
         public int LightHue { get; set; } = 80;
 
+        /// <summary>How saturated light colours are, in percent (100 = the light's own colour, higher = richer, 0 = grey).</summary>
+        public int LightSaturation { get; set; } = 100;
+
         /// <summary>Whether lights carried by players (lantern, glow ring) count.</summary>
         public bool PlayerLights { get; set; } = true;
     }

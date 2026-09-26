@@ -64,6 +64,11 @@ namespace AnimatedPortraitFramework.Framework
             if (!_packManager.Rules.TryGetValue(npcName, out var rules))
                 return null;
 
+            // ContentPatcher mode: only roll sub-variants that some mod actually loads a portrait for, so an outfit
+            // turned off in the Content Patcher pack isn't rolled. APF-mode packs are unchanged.
+            bool onlyLoadedVariants = _packManager.Portraits.TryGetValue(npcName, out var portrait) && portrait.IsContentPatcherControlled;
+            var content = ModEntry.Instance?.Helper?.GameContent;
+
             var eligible = new List<(int Priority, double Weight, string Id)>();
             foreach (var rule in rules)
             {
@@ -73,6 +78,13 @@ namespace AnimatedPortraitFramework.Framework
                 foreach (var variant in rule.Variants)
                 {
                     if (!ModEntry.Config.IsVariantEnabled(variant.Id))
+                        continue;
+
+                    // Before the priority/weight pick, so every player with the same mods rolls the same result.
+                    if (onlyLoadedVariants
+                        && content != null
+                        && !string.Equals(variant.Id, rootVariant, StringComparison.OrdinalIgnoreCase)
+                        && !VariantAssets.PortraitExists(content, npcName, variant.Id))
                         continue;
 
                     bool allPass = true;
